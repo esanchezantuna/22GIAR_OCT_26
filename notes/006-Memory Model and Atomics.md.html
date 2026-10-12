@@ -1,0 +1,1215 @@
+<meta charset="utf-8">
+**22GIAR - 006 - Modelo de Memoria y Atomics**
+    <small>©2026 VIU - 22GIAR Programación Concurrente, Distribuida y Paralela - Iván Fuertes</small>
+
+# Introducción
+
+Una de las características más importantes del estándar de C++ es algo que la mayoría de los programadores ni siquiera tendrá en cuenta. No son las nuevas características de sintaxis, ni los nuevas servicios de la librería, sino el nuevo modelo de memoria que tiene en cuenta el multihilo. Sin el modelo de memoria que define exactamente cómo funcionan estos bloques fundamentales vistos anteriormente, ninguno de ellos podría considerarse fiable. Hay una razón por la que la mayoría de los programadores no lo percibe, si se usan mutexes para proteger loss datos y variables de condición o futures para señalar eventos, los detalles de por qué funcionan no son importantes. Solo cuando se empieza a intentar estar cerca de la máquina es cuando los detalles precisos del modelo de memoria cobran relevancia.
+
+Sea lo que sea, C++ es un lenguaje de programación de sistemas. Uno de los objetivos del comité de estandarización es que no exista la necesidad de un lenguaje de nivel inferior a C++. A los programadores se les debe proporcionar suficiente flexibilidad dentro de C++ para hacer lo que necesiten sin que el lenguaje se interponga, permitiéndoles acercarse a la máquina cuando sea necesario. Los tipos y operaciones atómicas permiten precisamente eso, proporcionando servicios para operaciones de sincronización de bajo nivel que, habitualmente, se reducen a una o dos instrucciones de la CPU.
+
+# Modelo de Memoria
+
+Hay dos aspectos acerca del modelo de memoria, los aspectos estructurales básicos, que tienen que ver con como las cosas se disponen en la memoria, y aspectos de concurrencia. Los aspectos estructurales son importantes para la concurrencia, particularmente cunado se va a trabajar con operaciones atómicas a bajo nivel.
+
+## Objetos y ubicaciones de memoria
+
+Todos los datos en un programa de C++ están hechos de objetos. Esto no quiere decir que se pueda crear una nueva clase derivada de *int*, ni que los tipos fundamentales tengan funciones miembro, ni ninguna de las otras consecuencias que suelen implicarse cuando se dice  que todo es un objeto, cuando se habla de otros lenguajes como *Smalltalk* o *Ruby*. Se trata de una afirmación sobre los bloques básicos que componen los datos en C++. El estándar de C++ define un objeto como una región de almacenamiento, aunque posteriormente le asigna propiedades a dichos objetos, como su tipo y su tiempo de vida (*lifetime*).
+
+Algunos de estos objetos son valores simples de un tipo fundamental como *int* o *float*, mientras que otros son instancias de clases definidas por el usuario. Algunos objetos (como los arrays o vectores, las instancias de clases derivadas y las instancias de clases con miembros de datos no estáticos) tienen sub-objetos, pero otros no.
+
+Independientemente de su tipo, un objeto se almacena en una o más *ubicaciones de memoria*. Cada ubicación de memoria es, o bien un objeto (o sub-objeto) de un tipo escalar como *unsigned short* o *my_class*, o bien una secuencia de *bit fields* adyacentes. Si se usan *bit fields*, este es un punto importante a tener en cuenta, aunque los *bit fields* adyacentes son objetos distintos, siguen considerándose como la misma ubicación de memoria.
+
+![Figure [res/006_001]: División de un *struct* en objetos y ubicaciones de memoria](res/006_001.png)
+
+En Figure [res/006_001] se muestra cómo una estructura de datos se divide en objetos y ubicaciones de memoria. En primer lugar, la estructura completa es un único objeto que consta de varios sub-objetos, uno por cada miembro de datos. Los *bit fields* `bf1` y `bf2` comparten una ubicación de memoria, y el objeto `std::string` `s`, consta internamente de varias ubicaciones de memoria, pero por lo demás cada miembro tiene su propia ubicación de memoria.El *bit field* de longitud cero `bf3` (el nombre debería estar comentado porque los campos de bits de longitud cero deben ser anónimos, solo sirven para alinear al siguiente *bit field*) separa a `bf4` en su propia ubicación de memoria, pero no tiene una ubicación de memoria propia.
+
+Hay cuatro puntos clave a tener en cuenta:
+
+- Cada variables es un objeto, incluyendo aquellos que son miembros de otros objetos
+- Cada objeto ocupa al menos una ubicación de memoria
+- Las variables de tipos fundamentales, como *int* o *char* ocupan exactamente una ubicación de memoria, no importa su tamaño, incluso aunque sean adyacentes o parte de un array
+- Los *bit fields* adyacentes son parte de la misma ubicación de memoria
+
+## Objetos, ubicaciones de memoria y concurrencia
+
+Ahora viene la parte que es crucial para las aplicaciones multihilo en C++, todo gira en torno a esas ubicaciones de memoria. Si dos hilos acceden a ubicaciones de memoria distintas, no hay ningún problema, todo funciona correctamente. Por el contrario, si dos hilos acceden a la misma ubicación de memoria, entonces hay que tener cuidado. Si ninguno de los hilos está modificando la ubicación de memoria, no hay problema, los datos de solo lectura no necesitan protección ni sincronización. Si alguno de los hilos modifica los datos, existe un riesgo potencial de condición de carrera, como se vió anteriormente.
+
+Para evitar la condición de carrera, debe existir un orden impuesto entre los accesos de ambos hilos. Este orden puede ser fijo, de modo que un acceso ocurra siempre antes que el otro, o puede variar entre ejecuciones de la aplicación, pero debe garantizar que existe algún orden definido. Una forma de asegurar que exista un orden definido es usar mutexes. Si el mismo mutex se bloquea antes de ambos accesos, solo un hilo puede acceder a la ubicación de memoria a la vez, por lo que uno debe ocurrir antes que el otro (aunque, en general, no se puede saber de antemano cuál será el primero). La otra forma es utilizar las propiedades de sincronización de las operaciones atómicas, ya sea sobre la misma ubicación de memoria o sobre otras, para imponer un orden entre los accesos de los dos hilos. El uso de operaciones atómicas para imponer un orden se describe más adelante. Si más de dos hilos acceden a la misma ubicación de memoria, cada par de accesos debe tener un orden definido.
+
+Si no existe un orden impuesto entre dos accesos a una única ubicación de memoria desde hilos distintos, uno o ambos accesos no son atómicos y, si uno o ambos son escrituras, entonces se produce una carrera de datos *data race*, lo que provoca comportamiento indefinido.
+
+Esta afirmación es de importancia crítica, el comportamiento indefinido es uno de los rincones más peligrosos de C++. Según el estándar del lenguaje, una vez que una aplicación contiene cualquier comportamiento indefinido, todo deja de estar controlado. El comportamiento de la aplicación completa pasa a ser indefinido y puede hacer absolutamente cualquier cosa.
+
+Hay otro punto importante en esta afirmación, también se puede evitar el comportamiento indefinido usando operaciones atómicas para acceder a la ubicación de memoria implicada en la carrera. Esto no evita la carrera en sí (sigue sin estar especificado cuál de las operaciones atómicas accede primero a la memoria), pero devuelve el programa al terreno del comportamiento definido.
+
+# Órdenes de modificación
+
+Cada objeto en un programa C++ tiene un *orden de modificación* compuesto por todas las escrituras realizadas sobre ese objeto desde todos los hilos del programa, comenzando con la inicialización del objeto. En la mayoría de los casos, este orden variará entre distintas ejecuciones, pero en una ejecución concreta del programa todos los hilos del sistema deben estar de acuerdo en dicho orden. Si el objeto en cuestión no es uno de los tipos atómicos descritos más adelante, el programador es responsable de asegurarse de que exista la sincronización suficiente para garantizar que los hilos coincidan en el orden de modificación de cada variable. Si distintos hilos observan secuencias de valores diferentes para una misma variable, existe una carrera de datos *data race* y se produce comportamiento indefinido. Si se utilizan operaciones atómicas, el compilador es responsable de garantizar que la sincronización necesaria esté presente.
+
+Este requisito implica que ciertos tipos de ejecución especulativa no están permitidos, porque una vez que un hilo ha visto una entrada concreta en el orden de modificación, las lecturas posteriores de ese hilo deben devolver valores posteriores, y las escrituras posteriores de ese hilo sobre ese objeto deben producirse más adelante en el orden de modificación. Además, una lectura de un objeto que sigue a una escritura sobre ese mismo objeto dentro del mismo hilo debe devolver el valor escrito o algún otro valor que aparezca posteriormente en el orden de modificación de dicho objeto. Aunque todos los hilos deben coincidir en los órdenes de modificación de cada objeto individual de un programa, no necesariamente tienen que coincidir en el orden relativo de las operaciones realizadas sobre objetos distintos.
+
+# Operaciones atómicas y tipos en C++
+
+Una operación atómica es una operación indivisible. Ningún hilo del sistema puede observarla a medio realizar, o bien está completamente hecha o bien no se ha realizado en absoluto. Si la operación de lectura que obtiene el valor de un objeto es atómica, y todas las modificaciones a ese objeto también son atómicas, dicha lectura recuperará o bien el valor inicial del objeto o bien el valor almacenado por alguna de las modificaciones.
+
+La otra cara de la moneda es que una operación no atómica puede ser observada como parcialmente realizada por otro hilo. Si la operación no atómica está compuesta por operaciones atómicas (por ejemplo, una asignación a un `struct` que contiene miembros atómicos), entonces otros hilos pueden observar que algunas de las operaciones atómicas constituyentes ya se han completado, mientras que otras aún no han comenzado. Como resultado, se podría observar (o terminar con) un valor que sea una combinación mezclada de distintos valores almacenados. En cualquier caso, los accesos no sincronizados a variables no atómicas constituyen una condición de carrera básica, pero a este nivel pueden llegar a constituir una carrera de datos *data race* y provocar comportamiento indefinido.
+
+En C++, en la mayoría de los casos se necesita usar un tipo atómico para obtener una operación atómica.
+
+## Tipos atómicos standard
+
+Los tipos atómicos estándar pueden encontrarse en la cabecera `<atomic>`. Todas las operaciones sobre estos tipos son atómicas, y solo las operaciones sobre estos tipos son atómicas en el sentido definido por el lenguaje, aunque se pueden usar mutexes para hacer que otras operaciones parezcan atómicas. De hecho, los propios tipos atómicos estándar pueden utilizar este tipo de emulación, casi todos tienen una función miembro `is_lock_free()`, que permite al usuario determinar si las operaciones sobre un tipo concreto se realizan directamente mediante instrucciones atómicas del procesador (`x.is_lock_free()` devuelve `true`) o si se realizan usando un bloqueo interno del compilador y la biblioteca (`x.is_lock_free()` devuelve `false`).
+
+Esto es importante conocerlo en muchos casos, el principal caso de uso de las operaciones atómicas es servir como sustituto de una operación que, de otro modo, usaría un mutex para la sincronización. Si las propias operaciones atómicas utilizan internamente un mutex, entonces las mejoras de rendimiento esperadas probablemente no se materialicen, y puede que sea preferible utilizar la implementación basada en mutexes, que suele ser más sencilla de implementar correctamente. Este es el caso de las estructuras de datos *lock-free*.
+
+De hecho, esto es tan importante que la biblioteca proporciona un conjunto de macros para identificar en tiempo de compilación si los tipos atómicos correspondientes a los distintos tipos enteros son *lock-free*. Desde C++17, todos los tipos atómicos disponen de una variable miembro estática `constexpr`, `X::is_always_lock_free`, que es verdadera si y solo si el tipo atómico `X` es *lock-free* en todo el hardware compatible en el que podría ejecutarse el resultado de la compilación actual. Por ejemplo, para una plataforma objetivo determinada, `std::atomic<int>` podría ser siempre *lock-free*, por lo que `std::atomic<int>::is_always_lock_free` sería `true`. Sin embargo, `std::atomic<uintmax_t>` podría ser *lock-free* únicamente si el hardware en el que finalmente se ejecute el programa admite las instrucciones necesarias. En ese caso, se trata de una propiedad determinada en tiempo de ejecución, y `std::atomic<uintmax_t>::is_always_lock_free` sería `false` al compilar para esa plataforma.
+
+Las macros son
+
+- ATOMIC_BOOL_LOCK_FREE
+- ATOMIC_CHAR_LOCK_FREE
+- ATOMIC_CHAR16_T_LOCK_FREE
+- ATOMIC_CHAR32_T_LOCK_FREE
+- ATOMIC_WCHAR_T_LOCK_FREE
+- ATOMIC_SHORT_LOCK_FREE
+- ATOMIC_INT_LOCK_FREE
+- ATOMIC_LONG_LOCK_FREE
+- ATOMIC_LLONG_LOCK_FREE
+- ATOMIC_POINTER_LOCK_FREE
+
+Estas macros especifican el estado *lock-free* de los tipos atómicos correspondientes a los tipos integrales que vienen con el lenguaje y a sus equivalentes sin signo (`LLONG` se refiere a `long long`, y `POINTER` se refiere a todos los tipos puntero).
+
+Su valor es 0 si el tipo atómico nunca es *lock-free*, 2 si el tipo atómico es siempre *lock-free*, 1 si el carácter *lock-free* del tipo atómico es una propiedad determinada en tiempo de ejecución.
+
+El único tipo que no proporciona una función miembro `is_lock_free()` es `std::atomic_flag`. Este tipo es un flag booleano simple, y las operaciones sobre él están obligadas por el estándar a ser *lock-free*. Una vez que se dispone de un flag booleano simple y *lock-free*, puede utilizarse para implementar un bloqueo sencillo y, a partir de ahí, implementar todos los demás tipos atómicos.
+
+Los objetos del tipo `std::atomic_flag` se inicializan en estado limpio *clear*, y a partir de ahí solo pueden consultarse y establecerse mediante la función miembro `test_and_set()` o limpiarse mediante la función miembro `clear()`. Eso es todo, no hay asignación, ni construcción por copia, ni operación de comprobar y limpiar, ni ninguna otra operación adicional.
+
+El resto de los tipos atómicos se acceden mediante especializaciones de la clase templatizada `std::atomic<>` y son algo más completos en funcionalidad, pero pueden no ser *lock-free*. En la mayoría de las plataformas populares se espera que las variantes atómicas de todos los tipos integrados (como `std::atomic<int>` y `std::atomic<void*>`) sean realmente *lock-free*, pero el estándar no lo exige. La interfaz de cada especialización refleja las propiedades del tipo, por ejemplo, las operaciones bit a bit como `&=` no están definidas para punteros normales, por lo que tampoco lo están para punteros atómicos.
+
+Tipo atómico | Especialización correspondiente
+:--------|:--------
+`atomic_bool` | `std::atomic<bool>`
+`atomic_char` | `std::atomic<char>`
+`atomic_schar` | `std::atomic<signed char>`
+`atomic_uchar` | `std::atomic<unsigned char>`
+`atomic_int` | `std::atomic<int>`
+`atomic_uint` | `std::atomic<unsigned>`
+`atomic_short` | `std::atomic<short>`
+`atomic_ushort` | `std::atomic<unsigned short>`
+`atomic_long` | `std::atomic<long>`
+`atomic_ulong` | `std::atomic<unsigned long>`
+`atomic_llong` | `std::atomic<long long>`
+`atomic_ullong` | `std::atomic<unsigned long long>`
+`atomic_char16_t` | `std::atomic<char16_t>`
+`atomic_char32_t` | `std::atomic<char32_t>`
+`atomic_wchar_t` | `std::atomic<wchar_t>`
+[Table [atomic_1]: Tipos standard atómicos y las especializaciones `std::atomic<>`]
+
+Además de usar directamente la clase templatizada `std::atomic<>`, se puede utilizar el conjunto de nombres que se muestra en Table [atomic_1] para referirse a los tipos atómicos proporcionados por la implementación. Debido a la historia de cómo se añadieron los tipos atómicos al estándar de C++, si se utiliza un compilador antiguo, estos nombres alternativos pueden referirse bien a la especialización correspondiente de `std::atomic<>` o bien a una clase base de dicha especialización. En cambio, en un compilador que soporte completamente C++17, estos nombres son siempre alias de las especializaciones correspondientes de `std::atomic<>`. Por tanto, mezclar estos nombres alternativos con el uso directo de especializaciones de `std::atomic<>` dentro del mismo programa puede dar lugar a código no portable.
+
+Además de los tipos atómicos básicos, la biblioteca estándar de C++ también proporciona un conjunto de `typedefs` para los tipos atómicos que corresponden a los distintos `typedefs` no atómicos de la biblioteca estándar, como `std::size_t`.
+
+Atómico | `typedef` equivalente de la biblioteca standard
+:--------|:--------
+`atomic_int_least8_t` | `int_least8_t`
+`atomic_uint_least8_t` | `uint_least8_t`
+`atomic_int_least16_t` | `int_least16_t`
+`atomic_uint_least16_t` | `uint_least16_t`
+`atomic_int_least32_t` | `int_least32_t`
+`atomic_uint_least32_t` | `uint_least32_t`
+`atomic_int_least64_t` | `int_least64_t`
+`atomic_uint_least64_t` | `uint_least64_t`
+`atomic_int_fast8_t` | `int_fast8_t`
+`atomic_uint_fast8_t` | `uint_fast8_t`
+`atomic_int_fast16_t` | `int_fast16_t`
+`atomic_uint_fast16_t` | `uint_fast16_t`
+`atomic_int_fast32_t` | `int_fast32_t`
+`atomic_uint_fast32_t` | `uint_fast32_t`
+`atomic_int_fast64_t` | `int_fast64_t`
+`atomic_uint_fast64_t` | `uint_fast64_t`
+`atomic_intptr_t` | `intptr_t`
+`atomic_uintptr_t` | `uintptr_t`
+`atomic_size_t` | `size_t`
+`atomic_ptrdiff_t` | `ptrdiff_t`
+`atomic_intmax_t` | `intmax_t`
+`atomic_uintmax_t` | `uintmax_t`
+[Table [atomic_2]: `typedefs` atómicos standard y sus correspondientes standard]
+
+Pese a que son muchos timpos, existe un patrón bastante sencillo, para un `typedef` estándar `T`, el tipo atómico correspondiente tiene el mismo nombre con el prefijo `atomic_`, siendo `atomic_T`. Lo mismo se aplica a los tipos integrados, excepto que `signed` se abrevia como `s`, `unsigned` como `u`, y `long long` como `llong`. En general, resulta más sencillo usar `std::atomic<T>` para el tipo `T` con el que se quiera trabajar, en lugar de utilizar estos nombres alternativos.
+
+Los tipos atómicos estándar no son copiables ni asignables en el sentido convencional, ya que no tienen constructores de copia ni operadores de asignación por copia. Sin embargo, sí admiten la asignación desde los tipos integrados correspondientes y la conversión implícita hacia ellos, además de las funciones miembro explícitas `load()` y `store()`, `exchange()`, `compare_exchange_weak()` y `compare_exchange_strong()`. También admiten los operadores de asignación compuesta cuando corresponde, `+=`, `-=`, `*=`, `|=`,.. Y los tipos integrales y las especializaciones de `std::atomic<>` para punteros admiten además `++` y `--`. Estos operadores también cuentan con funciones miembro con nombre que proporcionan la misma funcionalidad, `fetch_add()`, `fetch_or()`, ... El valor devuelto por los operadores de asignación y por estas funciones miembro es, o bien el valor almacenado (en el caso de los operadores de asignación), o bien el valor previo a la operación (en el caso de las funciones con nombre). Esto evita los posibles problemas que podrían derivarse de la costumbre habitual de que estos operadores devuelvan una referencia al objeto al que se asigna. Para obtener el valor almacenado a partir de esas referencias, el código tendría que realizar una lectura independiente, lo que permitiría que otro hilo modificara el valor entre la asignación y la lectura, abriendo la puerta a una condición de carrera.
+
+La plantilla de clase `std::atomic<>` no es únicamente un conjunto de especializaciones. También dispone de una plantilla primaria que puede utilizarse para crear una variante atómica de un tipo definido por el usuario. Al tratarse de una plantilla de clase genérica, las operaciones disponibles se limitan a `load()`, `store()` (y la asignación desde y la conversión hacia el tipo definido por el usuario), `exchange()`, `compare_exchange_weak()` y `compare_exchange_strong()`.
+
+Cada una de las operaciones sobre los tipos atómicos admite un argumento opcional de orden de memoria, que es uno de los valores de la enumeración `std::memory_order`. Este argumento se utiliza para especificar la semántica de ordenamiento de memoria requerida.
+
+La enumeración std::memory_order tiene seis valores posibles
+
+- std::memory_order_relaxed
+- std::memory_order_acquire
+- std::memory_order_consume
+- std::memory_order_acq_rel
+- std::memory_order_release
+- std::memory_order_seq_cst
+
+Los valores permitidos para el orden de memoria dependen de la categoría de la operación. Si no se especifica un valor de ordenamiento, se utiliza el orden por defecto, que es el más fuerte, `std::memory_order_seq_cst`. La semántica precisa de las distintas opciones de orden de memoria se explican más adelante. Por ahora, basta con saber que las operaciones se dividen en tres categorías.
+
+1. Operaciones de almacenamiento *store*, que pueden usar `memory_order_relaxed`, `memory_order_release` o `memory_order_seq_cst`
+
+2. Operaciones de lectura *load*, que pueden usar `memory_order_relaxed`, `memory_order_consume`, `memory_order_acquire` o `memory_order_seq_cst`
+
+3. Operaciones de lectura–modificación–escritura *read-modify-write*, que pueden usar `memory_order_relaxed`, `memory_order_consume`, `memory_order_acquire`, `memory_order_release`, `memory_order_acq_rel` o `memory_order_seq_cst`
+
+## Operaciones sobre `std::atomic_flag`
+
+`std::atomic_flag` es el tipo atómico estándar más simple y representa un flag booleano. Los objetos de este tipo pueden encontrarse en uno de dos estados: establecido *set* o limpio *clear*. Es deliberadamente básico y está pensado únicamente como un bloque de construcción. Por ello, no debería usarse salvo en circunstancias especiales. Aun así, sirve como punto de partida para analizar los demás tipos atómicos, ya que muestra algunas de las políticas generales que se aplican a los tipos atómicos.
+
+Los objetos del tipo `std::atomic_flag` deben inicializarse con `ATOMIC_FLAG_INIT`. Esto inicializa el flag al estado limpio *clear*. No hay posibilidad de elección, el flag siempre comienza limpio.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::atomic_flag f = ATOMIC_FLAG_INIT;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_flag_init]: Inicialización de `std::atomic_flag`]
+
+Esto se aplica independientemente de dónde se declare el objeto y del ámbito que tenga. Es el único tipo atómico que requiere este tratamiento especial para la inicialización, pero también es el único tipo que está garantizado como *lock-free*. Si el objeto `std::atomic_flag` tiene almacenamiento estático, se garantiza que se inicializa de forma estática, lo que significa que no existen problemas de orden de inicialización, siempre estará inicializado cuando se realice la primera operación sobre el flag.
+
+Una vez inicializado el objeto flag, solo hay tres cosas que pueden hacerse con él, destruirlo, limpiarlo o establecerlo consultando el valor previo. Estas acciones corresponden, respectivamente, al destructor, a la función miembro `clear()` y a la función miembro `test_and_set()`. Tanto `clear()` como `test_and_set()` pueden recibir un orden de memoria como parámetro. `clear()` es una operación de escritura *store*, por lo que no puede tener semántica `memory_order_acquire` ni `memory_order_acq_rel`. En cambio, `test_and_set()` es una operación de lectura–modificación–escritura *read-modify-write*, y por tanto puede usar cualquiera de las etiquetas de orden de memoria. Como ocurre con todas las operaciones atómicas, el valor por defecto para ambas es `memory_order_seq_cst`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+f.clear(std::memory_order_release);
+bool x = f.test_and_set();
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_flag_use]: Uso de `std::atomic_flag`]
+
+Aquí, la llamada a `clear()` solicita explícitamente que el flag se limpie con semántica de liberación *release*, mientras que la llamada a `test_and_set()` utiliza el orden de memoria por defecto para establecer la bandera y recuperar el valor anterior.
+
+No se puede construir por copia otro objeto `std::atomic_flag` a partir del primero, ni se puede asignar un `std::atomic_flag` a otro. Esto no es algo exclusivo de `std::atomic_flag`, sino una característica común a todos los tipos atómicos. Todas las operaciones sobre un tipo atómico están definidas como atómicas, y tanto la asignación como la construcción por copia implican dos objetos. Una única operación sobre dos objetos distintos no puede ser atómica. En el caso de la construcción por copia o de la asignación por copia, el valor debe leerse primero de un objeto y luego escribirse en el otro. Estas son dos operaciones separadas sobre dos objetos distintos, y su combinación no puede ser atómica. Por lo tanto, dichas operaciones no están permitidas.
+
+El conjunto limitado de funcionalidades hace que `std::atomic_flag` sea ideal para utilizarse como un *mutex* de tipo *spinlock*. Inicialmente, el flag está limpio y el *mutex* se encuentra desbloqueado. Para bloquear el *mutex*, se itera en un bucle llamando a `test_and_set()` hasta que el valor anterior sea `false`, lo que indica que este hilo ha establecido el valor a `true`. Desbloquear el *mutex* consiste simplemente en limpiar el flag.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class spinlock_mutex {
+  std::atomic_flag flag;
+
+  public:
+    spinlock_mutex() :
+        flag(ATOMIC_FLAG_INIT) {}
+
+    void lock() {
+        while(flag.test_and_set(std::memory_order_acquire));
+    }
+
+    void unlock() {
+        flag.clear(std::memory_order_release);
+    }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_flag_mutex]: Implementación de un *mutex* *spinlock* usando `std::atomic_flag`]
+
+Este *mutex* es básico, pero es suficiente para usarlo con `std::lock_guard<>`. Por su propia naturaleza, realiza espera activa *busy-wait* en `lock()`, por lo que es una mala elección si se espera cualquier grado de contención, pero es suficiente para garantizar la exclusión mutua. Cuando se analiza la semántica de ordenamiento de memoria, se ve cómo esto garantiza el orden impuesto necesario que acompaña al bloqueo de un *mutex*.
+
+`std::atomic_flag` es tan limitado que ni siquiera puede utilizarse como un flag booleano general, ya que no dispone de una operación simple de consulta que no modifique el valor. Para eso es preferible utilizar `std::atomic<bool>`.
+
+## Operaciones sobre `std::atomic<bool>`
+
+El más básico de los tipos integrales atómicos es `std::atomic<bool>`. Se trata de un flag booleano con más funcionalidades que `std::atomic_flag`, como era de esperar. Aunque sigue sin poderse construir por copia ni asignarse por copia, puede construirse a partir de un bool no atómico, por lo que puede inicializarse como `true` o `false`, y también es posible asignar valores a instancias de `std::atomic<bool>` desde un bool no atómico.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::atomic<bool> b(true);
+b = false;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_bool]: Inicialización y asignación de un `std::atomic<bool>`]
+
+Otro aspecto a tener en cuenta sobre el operador de asignación desde un bool no atómico es que difiere de la convención general de devolver una referencia al objeto al que se asigna, en su lugar, devuelve un bool con el valor asignado. Este es otro patrón común en los tipos atómicos, los operadores de asignación soportan valores de retorno (del tipo no atómico correspondiente) en lugar de referencias. Si se devolviera una referencia a la variable atómica, cualquier código que dependiera del resultado de la asignación tendría que cargar explícitamente el valor, pudiendo obtener el resultado de una modificación realizada por otro hilo. Al devolver el resultado de la asignación como un valor no atómico, se evita esta lectura adicional y se garantiza que el valor obtenido es el valor almacenado en ese momento.
+
+En lugar de utilizar la restrictiva función `clear()` de `std::atomic_flag`, las escrituras (ya sea `true` o `false`) se realizan llamando a `store()`, aunque las semánticas de orden de memoria se pueden seguir especificando. Del mismo modo, `test_and_set()` ha sido sustituida por la función miembro más general `exchange()`, que permite reemplazar el valor almacenado por uno nuevo elegido por el usuario y recuperar de forma atómica el valor original.`std::atomic<bool>` también admite una consulta simple del valor sin modificarlo, ya sea mediante una conversión implícita a bool o mediante una llamada explícita a `load()`. Como cabría esperar, `store()` es una operación de escritura, mientras que `load()` es una operación de lectura. `exchange()` es una operación de lectura–modificación–escritura *read-modify-write*.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::atomic<bool> b;
+bool x = b.load(std::memory_order_acquire);
+b.store(true);
+x = b.exchange(false,std::memory_order_acq_rel);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_bool2]: Uso de un `std::atomic<bool>`]
+
+`exchange()` no es la única operación de lectura–modificación–escritura admitida por `std::atomic<bool>`, también se introduce una operación que permite almacenar un nuevo valor si el valor actual es igual a un valor esperado.
+
+### Almacenar un nuevo valor (o no) en función del valor actual
+
+Esta nueva operación se denomina *compare-exchange*, y se presenta en forma de las funciones miembro `compare_exchange_weak()` y `compare_exchange_strong()`. La operación *compare-exchange* es la piedra angular de la programación con tipos atómicos, compara el valor de la variable atómica con un valor esperado proporcionado y almacena un valor deseado también proporcionado si ambos son iguales. Si los valores no coinciden, el valor esperado se actualiza con el valor actual de la variable atómica. El tipo de retorno de las funciones *compare-exchange* es `bool`, que es `true` si se realizó el almacenamiento y `false` en caso contrario. Se dice que la operación tiene éxito si se efectúa la escritura (porque los valores eran iguales), y falla en caso contrario, el valor devuelto es `true` para el éxito y `false` para el fallo.
+
+En el caso de `compare_exchange_weak()`, la escritura puede no realizarse incluso aunque el valor original sea igual al valor esperado. En tal situación, el valor de la variable permanece sin cambios y la función devuelve `false`. Esto es más probable en máquinas que carecen de una única instrucción de *compare-and-exchange*, cuando el procesador no puede garantizar que la operación se haya realizado de forma atómica (posiblemente porque el hilo que ejecuta la operación fue interrumpido a mitad de la secuencia necesaria de instrucciones y el sistema operativo planificó otro hilo en su lugar, especialmente cuando hay más hilos que procesadores). A esto se le denomina fallo espurio o falso *spurious failure*, porque la razón del fallo depende del timing y no de los valores de las variables.
+
+Debido a que `compare_exchange_weak()` puede fallar de forma falsa o espuria, normalmente debe utilizarse dentro de un bucle.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+bool expected = false;
+extern atomic<bool> b;           // se asigna en algun otro sitio
+while(!b.compare_exchange_weak(expected,true) && !expected);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_bool_exchange_weak]: Uso de `compare_exchange_weak` en un `std::atomic<bool>`]
+
+En este caso, se continúa iterando mientras `expected` siga siendo `false`, lo que indica que la llamada a `compare_exchange_weak()` ha fallado de forma espuria.
+
+Por el contrario, `compare_exchange_strong()` garantiza que solo devolverá `false` si el valor no era igual al valor esperado. Esto puede eliminar la necesidad de bucles como el mostrado cuando se quiere saber si se ha modificado correctamente una variable o si otro hilo llegó antes.
+
+Si se quiere cambiar la variable independientemente de su valor inicial (quizá con un valor actualizado que dependa del valor actual), la actualización de `expected` resulta útil, en cada iteración del bucle, `expected` se recarga, de modo que, si ningún otro hilo modifica el valor entre medias, la llamada a `compare_exchange_weak()` o `compare_exchange_strong()` debería tener éxito en la siguiente vuelta del bucle. Si el cálculo del valor que se va a almacenar es sencillo, puede ser beneficioso usar `compare_exchange_weak()` para evitar un doble bucle en plataformas donde `compare_exchange_weak()` puede fallar de forma espuria (y por tanto `compare_exchange_strong()` contiene internamente un bucle). Por otro lado, si el cálculo del valor a almacenar es costoso, puede tener más sentido usar `compare_exchange_strong()` para evitar tener que recalcular el valor cuando el valor esperado no ha cambiado. Para `std::atomic<bool>` esto no es tan importante (al fin y al cabo solo existen dos valores posibles), pero para tipos atómicos de mayor tamaño esta diferencia puede ser significativa.
+
+Las funciones `compare-exchange` también son inusuales en el sentido de que pueden recibir dos parámetros de orden de memoria. Esto permite que la semántica de ordenamiento de memoria sea distinta en los casos de éxito y de fallo, por ejemplo, puede ser deseable que una llamada exitosa tenga semántica `memory_order_acq_rel`, mientras que una llamada fallida tenga semántica `memory_order_relaxed`. Un *compare-exchange* fallido no realiza ninguna escritura, por lo que no puede tener semántica `memory_order_release` ni `memory_order_acq_rel`. Por ello, no está permitido suministrar estos valores como ordenamiento en caso de fallo. Tampoco se puede especificar un orden de memoria más estricto para el fallo que para el éxito, si se desea semántica `memory_order_acquire` o `memory_order_seq_cst` para el fallo, debe especificarse también para el éxito.
+
+Si no se especifica un orden para el caso de fallo, se asume que es el mismo que el del éxito, excepto que se elimina la parte de liberación *release* del ordenamiento, `memory_order_release` se convierte en `memory_order_relaxed`, y `memory_order_acq_rel` se convierte en `memory_order_acquire`. Si no se especifica ninguno de los dos, ambos usan por defecto `memory_order_seq_cst`, como es habitual, lo que proporciona un orden secuencial completo tanto en el éxito como en el fallo.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::atomic<bool> b;
+bool expected;
+b.compare_exchange_weak(expected,true, memory_order_acq_rel,memory_order_acquire);
+b.compare_exchange_weak(expected,true,memory_order_acq_rel);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_bool_compare_exchange_weak]: Uso de `compare_exchange_weak` con orden de memoria]
+
+Las dos llamadas a `compare_exchange_weak()` son equivalentes.
+
+Una diferencia adicional entre `std::atomic<bool>` y `std::atomic_flag` es que `std::atomic<bool>` puede no ser *lock-free*, la implementación puede necesitar adquirir internamente un *mutex* para garantizar la atomicidad de las operaciones. En el caso poco frecuente en el que esto sea relevante, se puede usar la función miembro `is_lock_free()` para comprobar si las operaciones sobre `std::atomic<bool>` son *lock-free*. Esta es otra característica común a todos los tipos atómicos, excepto `std::atomic_flag`.
+
+## Operaciones sobre `std::atomic<T*>`, aritmética de punteros
+
+La forma atómica de un puntero a un tipo `T` es `std::atomic<T*>`, del mismo modo que la forma atómica de `bool` es `std::atomic<bool>`. La interfaz es la misma, aunque opera sobre valores del tipo de puntero correspondiente en lugar de valores `bool`. Al igual que `std::atomic<bool>`, no es ni copiable por construcción ni asignable por copia, aunque sí puede construirse y asignarse a partir de valores de puntero adecuados. Además de la obligatoria función miembro `is_lock_free()`, `std::atomic<T*>` también dispone de las funciones miembro `load()`, `store()`, `exchange()`, `compare_exchange_weak()` y `compare_exchange_strong()`, con una semántica similar a la de `std::atomic<bool>`, pero tomando y devolviendo valores `T*` en lugar de `bool`.
+
+Las nuevas operaciones que proporciona `std::atomic<T*>` son las de aritmética de punteros. Las operaciones básicas se ofrecen mediante las funciones miembro `fetch_add()` y `fetch_sub()`, que realizan suma y resta atómicas sobre la dirección almacenada, así como los operadores `+=` y `-=`, y tanto el pre como el post incremento y decremento con `++` y `--`, que proporcionan wrappers más cómodos. Los operadores funcionan tal como cabría esperar de los tipos integrados, si `x` es un `std::atomic<Foo*>` que apunta al primer elemento de un array de objetos `Foo`, entonces `x += 3` lo cambia para que apunte al cuarto elemento y devuelve un `Foo*` normal que también apunta a ese cuarto elemento. `fetch_add()` y `fetch_sub()` son ligeramente diferentes, ya que devuelven el valor original (por ejemplo, `x.fetch_add(3)` actualizará `x` para que apunte al cuarto elemento, pero devolverá un puntero al primer elemento del array). Esta operación también se conoce como *exchange-and-add*, y es una operación atómica de tipo *lectura–modificación–escritura*, al igual que `exchange()` y `compare_exchange_weak()` / `compare_exchange_strong()`. Como ocurre con las demás operaciones, el valor devuelto es un valor `T*` normal y no una referencia al objeto `std::atomic<T*>`, de modo que el código que realiza la llamada puede actuar en función de cuál era el valor anterior.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class Foo{};
+Foo some_array[5];
+std::atomic< Foo*> p(some_array);
+Foo* x = p.fetch_add(2);   // añade 2 a p y devuelve el valor anterior
+assert(x == some_array);
+assert(p.load() == &some_array[2]);
+x = (p -= 1);               // resta 1 a p y devuelve el valor nuevo
+assert(x == &some_array[1]);
+assert(p.load() == &some_array[1]);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_pointer_add]: Uso de aritmética de punteros sobre un `std::atomic<T*>`]
+
+Las diversas versiones de estas funciones también permiten especificar la semántica de orden de memoria como un argumento adicional en la llamada a la función.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+p.fetch_add(3, std::memory_order_release);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_pointer_memory]: Orden de memoria en aritmética de punteros sobre un `std::atomic<T*>`]
+
+Dado que tanto `fetch_add()` como `fetch_sub()` son operaciones de lectura–modificación–escritura *read-modify-write*, pueden utilizar cualquiera de las etiquetas de orden de memoria y pueden participar en una secuencia de liberación *release sequence*. No es posible especificar la semántica de orden de memoria en las formas mediante operadores, porque no existe ningún mecanismo para proporcionar esa información, por lo tanto, estas formas siempre tienen semántica `memory_order_seq_cst`.
+
+## Operaciones sobre los tipos integrales atómicos estándar
+
+Además del conjunto habitual de operaciones `load()`, `store()`, `exchange()`, `compare_exchange_weak()` y `compare_exchange_strong()`, los tipos enteros atómicos, como `std::atomic<int>` o `std::atomic<unsigned long long>`, disponen de un conjunto bastante completo de operaciones, `fetch_add()`, `fetch_sub()`, `fetch_and()`, `fetch_or()`, `fetch_xor()`, las formas de asignación compuesta de estas operaciones (`+=`, `-=`, `&=`, `|=` y `^=`),
+y los operadores de incremento y decremento tanto pre como post (`++x`, `x++`, `--x` y `x--`). No es exactamente el conjunto completo de operaciones de asignación compuesta que se podría realizar sobre un tipo entero normal, pero es lo suficientemente cercano, solo faltan la división, la multiplicación y los operadores de desplazamiento. Dado que los valores enteros atómicos se utilizan normalmente como contadores o máscaras de bits, esta carencia no resulta especialmente significativa, si fuera necesario, operaciones adicionales pueden implementarse fácilmente utilizando `compare_exchange_weak()` dentro de un bucle.
+
+La semántica coincide estrechamente con la de `fetch_add()` y `fetch_sub()` para `std::atomic<T*>`, las funciones con nombre realizan la operación de forma atómica y devuelven el valor anterior, mientras que los operadores de asignación compuesta devuelven el nuevo valor. Los operadores de incremento y decremento pre y post funcionan como es habitual, `++x` incrementa la variable y devuelve el nuevo valor, mientras que `x++` incrementa la variable y devuelve el valor antiguo. Como cabría esperar, en ambos casos el resultado es un valor del tipo entero asociado.
+
+## La plantilla de clase primaria std::atomic<>
+
+La presencia del template primario permite al usuario crear una variante atómica de un tipo definido por el usuario, además de los tipos atómicos estándar. Dado un tipo definido por el usuario UDT *User Defined Type*, `std::atomic<UDT>` proporciona la misma interfaz que `std::atomic<bool>`, excepto que los parámetros y valores de retorno de tipo `bool` relacionados con el valor almacenado (y no con el resultado de éxito/fallo de las operaciones *compare-exchange*) se reemplazan por `UDT`. No se puede usar cualquier tipo definido por el usuario con `std::atomic<>`, el tipo debe cumplir ciertos criterios. Para usar `std::atomic<UDT>` con un tipo definido por el usuario `UDT`, este tipo debe tener un operador de asignación por copia trivial. Esto significa que el tipo no debe tener funciones virtuales ni clases base virtuales y debe usar el operador de asignación por copia generado por el compilador. No solo eso, sino que todas las clases base y miembros de datos no estáticos de un tipo definido por el usuario también deben tener un operador de asignación por copia trivial. Esto permite que el compilador use `memcpy()` o una operación equivalente para las asignaciones, ya que no hay código escrito por el usuario que ejecutar.
+
+Por último, vale la pena señalar que las operaciones *compare-exchange* realizan comparación bit a bit como si usaran `memcmp`, en lugar de usar cualquier operador de comparación que pueda estar definido para `UDT`. Si el tipo proporciona operaciones de comparación con semánticas distintas, o si el tipo tiene bits de relleno *padding* que no participan en comparaciones normales, esto puede hacer que una operación *compare-exchange* falle, incluso aunque los valores comparados sean iguales según la semántica del tipo.
+
+El razonamiento detrás de estas restricciones se remonta a una de las pautas vistas anteriormente, no hay que pasar punteros ni referencias a datos protegidos fuera del alcance del bloqueo, por ejemplo, pasándolos como argumentos a funciones proporcionadas por el usuario. En general, el compilador no podrá generar código *lock-free* para `std::atomic<UDT>`, por lo que tendrá que usar un bloqueo interno para todas las operaciones. Si se permitieran operadores de asignación por copia o comparación definidos por el usuario, esto requeriría pasar referencias a los datos protegidos como argumentos a una función del usuario, violando la pauta.
+
+Además, la biblioteca puede usar un único bloqueo para todas las operaciones atómicas que lo necesiten, y permitir que se llamen funciones proporcionadas por el usuario mientras se mantiene ese bloqueo podría provocar interbloqueos *deadlock* o bloquear a otros hilos si una operación de comparación tarda mucho. Finalmente, estas restricciones aumentan la posibilidad de que el compilador pueda usar instrucciones atómicas directamente para `std::atomic<UDT>` (y hacer que una instanciación particular sea *lock-free*), ya que puede tratar el tipo definido por el usuario como un conjunto de bytes sin procesar.
+
+TAunque se puede usar `std::atomic<float>` o `std::atomic<double>` (porque los tipos de punto flotante incorporados cumplen los criterios para usar `memcpy` y `memcmp`), el comportamiento puede ser sorprendente en el caso de `compare_exchange_strong` (`compare_exchange_weak` siempre puede fallar por razones internas arbitrarias, como se describió anteriormente). La operación puede fallar incluso aunque el valor almacenado antiguo sea igual al comparando, si el valor almacenado tiene una representación diferente. No existen operaciones aritméticas atómicas sobre valores de punto flotante. Se obtiene un comportamiento similar con `compare_exchange_strong` al usar `std::atomic<>` con un tipo definido por el usuario que tenga un operador de igualdad definido, y ese operador difiera de la comparación usando `memcmp`, la operación puede fallar porque los valores, aunque iguales según el operador, tienen una representación diferente.
+
+Si el `UDT` tiene el mismo tamaño que (o menor que) un `int` o un `void*`, la mayoría de las plataformas comunes podrán usar instrucciones atómicas para `std::atomic<UDT>`. Algunas plataformas también podrán usar instrucciones atómicas para tipos definidos por el usuario que tengan el doble de tamaño que un `int` o `void*`. Estas plataformas suelen ser aquellas que soportan la instrucción llamada *double-word-compare-and-swap* (*DWCAS*), correspondiente a las funciones `compare_exchange_xxx`. Dicho soporte puede ser útil al escribir código *lock-free*.
+
+Estas restricciones significan que no se puede, por ejemplo, crear `std::atomic<std::vector<int>>` (porque tiene un constructor y operador de asignación no triviales), pero sí se puede instanciar `std::atomic<>` con clases que contengan contadores, flags, punteros o incluso arrays de elementos de datos simples. Esto no supone un problema, cuanto más compleja sea la estructura de datos, más probable es que se quieran realizar operaciones distintas a una simple asignación o comparación. En ese caso, es preferible usar un `std::mutex` para garantizar que los datos estén correctamente protegidos para las operaciones deseadas.
+
+Como ya se mencionó, al instanciarse con un tipo definido por el usuario `T`, la interfaz de `std::atomic<T>` se limita al conjunto de operaciones disponibles para `std::atomic<bool>`, `load()`, `store()`, `exchange()`, `compare_exchange_weak()`, `compare_exchange_strong()`, y asignación desde y conversión a una instancia de tipo `T`.
+
+Operación | `atomic_flag` | `atomic<bool>` | `atomic<T*>` | `atomic<integral_type>` | `atomic<other_type>`
+:--------|:--------|:--------|:--------|:--------|:--------
+`test_and_set`              | X | | | | |
+`clear`                     | X | | | | |
+`is_lock_free`              | | X | X | X | X |
+`load`                      | | X | X | X | X |
+`store`                     | | X | X | X | X |
+`exchange`                  | | X | X | X | X |
+`compare_exchange_weak`     | | X | X | X | X |
+`compare_exchange_strong`   | | X | X | X | X |
+`fetch_add`, `+=`           | | | X | X | |
+`fetch_sub`, `-=`           | | | X | X | |
+`fetch_or`, `|=`            | | | | X | |
+`fetch_and`, `&=`           | | | | X | |
+`fetch_xor`, `^=`           | | | | X | |
+`++`, `--`                  | | | X | X | |
+[Table [atomic_ops]: Operaciones disponibles sobre los tipos atómicos]
+
+## Funciones libres para operaciones atómicas
+
+Además de las funciones miembro de las operaciones sobre los tipos atómicos, también existen funciones no miembro equivalentes para todas las operaciones sobre los distintos tipos atómicos. En su mayoría, las funciones no miembro reciben el mismo nombre que las funciones miembro correspondientes, pero con el prefijo `atomic_` (por ejemplo, `std::atomic_load()`). Estas funciones están sobrecargadas para cada uno de los tipos atómicos. Cuando existe la posibilidad de especificar una etiqueta de orden de memoria, estas funciones aparecen en dos variantes, una sin la etiqueta y otra con el sufijo `_explicit`, que incluye uno o más parámetros adicionales para indicar el orden de memoria (por ejemplo, `std::atomic_store(&atomic_var, new_value)` frente a `std::atomic_store_explicit(&atomic_var, new_value, std::memory_order_release)`). Mientras que el objeto atómico que se referencia por las funciones miembro es implícito, todas las funciones libres reciben un puntero al objeto atómico como primer parámetro.
+
+Por ejemplo, `std::atomic_is_lock_free()` existe en una única variante (aunque sobrecargada para cada tipo), y `std::atomic_is_lock_free(&a)` devuelve el mismo valor que `a.is_lock_free()` para un objeto atómico `a`. De igual modo, `std::atomic_load(&a)` es equivalente a `a.load()`, pero el equivalente de `a.load(std::memory_order_acquire)` es `std::atomic_load_explicit(&a, std::memory_order_acquire)`.
+
+Las funciones libres están diseñadas para ser compatibles con C, por lo que utilizan punteros en lugar de referencias en todos los casos. Por ejemplo, el primer parámetro de las funciones miembro `compare_exchange_weak()` y `compare_exchange_strong()` (que es el valor esperado) es una referencia, mientras que el segundo parámetro de `std::atomic_compare_exchange_weak()` (siendo el primero el puntero al objeto) es un puntero. Además, `std::atomic_compare_exchange_weak_explicit()` exige que se especifiquen ambos órdenes de memoria, el de éxito y el de fallo, mientras que las funciones miembro *compare-exchange* disponen tanto de una versión con un único orden de memoria (con valor por defecto `std::memory_order_seq_cst`) como de una sobrecarga que acepta por separado los órdenes de éxito y de fallo.
+
+Las operaciones sobre `std::atomic_flag` se apartan de esta convención en que incluyen explícitamente la palabra `flag` en sus nombres, `std::atomic_flag_test_and_set()` y `std::atomic_flag_clear()`. Las variantes adicionales que permiten especificar el orden de memoria vuelven a usar el sufijo `_explicit`, `std::atomic_flag_test_and_set_explicit()` y `std::atomic_flag_clear_explicit()`.
+
+La biblioteca estándar de C++ también proporciona funciones libres para acceder de forma atómica a instancias de `std::shared_ptr<>`. Esto rompe el principio de que solo los tipos atómicos admiten operaciones atómicas, ya que `std::shared_ptr<>` no es, en absoluto, un tipo atómico (acceder al mismo objeto `std::shared_ptr<T>` desde varios hilos sin usar estas funciones atómicas desde todos los hilos, o sin otra sincronización externa adecuada, constituye una condición de carrera y provoca comportamiento indefinido). Aun así, se consideró importante proporcionar estas funciones adicionales. Las operaciones atómicas disponibles son `load`, `store`, `exchange` y `compare-exchange`, y se ofrecen como sobrecargas de las mismas operaciones usadas con los tipos atómicos estándar, tomando un `std::shared_ptr<>*` como primer argumento.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::shared_ptr<my_data> p;
+
+void process_global_data() {
+    std::shared_ptr<my_data> local = std::atomic_load(&p);
+    process_data(local);
+}
+
+void update_global_data() {
+    std::shared_ptr<my_data> local(new my_data);
+    std::atomic_store(&p,local);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_shared_ptr]: Uso de atomics en `std::shared_ptr<>*`]
+
+Al igual que ocurre con las operaciones atómicas sobre otros tipos, también se proporcionan las variantes `_explicit`, que permiten especificar el orden de memoria deseado, y la función `std::atomic_is_lock_free()` puede utilizarse para comprobar si la implementación emplea bloqueos para garantizar la atomicidad.
+
+# Sincronizando operaciones y estableciendo el orden
+
+Supongamos que se tienen dos hilos, uno de los cuales está rellenando una estructura de datos que será leída por el segundo. Para evitar una condición de carrera problemática, el primer hilo establece un flag para indicar que los datos están listos, y el segundo hilo no lee los datos hasta que dicho flag no esté activada.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <vector>
+#include <atomic>
+#include <iostream>
+
+std::vector<int> data;
+std::atomic<bool> data_ready(false);
+
+void reader_thread() {
+    while(!data_ready.load()) {
+        std::this_thread::sleep(std::chrono::milliseconds(1));
+    }
+    std::cout << "The answer = " << data[0] << "\n";
+}
+
+void writer_thread() {
+    data.push_back(42);
+    data_ready = true;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [reader_writer]: Leyendo y escribiendo en variables desde distintos hilos]
+
+Dejando a un lado la ineficiencia del bucle que espera a que los datos estén listos, esto funciona, porque de lo contrario compartir datos entre hilos se volvería poco práctico, cada elemento de datos estaría obligado a ser atómico. Ya se ha visto que es comportamiento indefinido que lecturas y escrituras no atómicas accedan a los mismos datos sin un orden impuesto, por lo que para que esto funcione debe existir algún tipo de orden forzado.
+
+El orden forzado necesario proviene de las operaciones sobre la variable `std::atomic<bool> data_ready`, estas proporcionan el orden requerido gracias a las relaciones del modelo de memoria llamadas sucede-antes *happens-before* y sincroniza-con *synchronizes-with*. La escritura de los datos ocurre antes de la escritura en el flag `data_ready`, y la lectura del flag ocurre antes de la lectura de los datos. Cuando el valor leído de `data_ready` es `true`, la escritura se sincroniza con esa lectura, creando una relación *happens-before*. Dado que *happens-before* es transitiva, la escritura de los datos ocurre antes de la escritura del flag, que ocurre antes de la lectura del valor `true` del flag, que ocurre antes de la lectura de los datos. De este modo se obtiene un orden forzado, la escritura de los datos ocurre antes de su lectura, y todo es correcto. En Figure [res/006_002] se muestran las relaciones *happens-before* importantes entre los dos hilos.
+
+![Figure [res/006_002]: Forzando el orden entre operaciones no atómicas usando operaciones atómicas](res/006_002.png)
+
+Todo esto puede parecer bastante intuitivo, la operación que escribe un valor ocurre antes que la operación que lee ese valor. Con las operaciones atómicas por defecto, esto es efectivamente cierto (y por eso es el valor predeterminado), pero conviene dejarlo explícito, las operaciones atómicas también admiten otras opciones de orden de memoria, que se verán en breve.
+
+## La relación synchronizes-with
+
+La relación *synchronizes-with* es algo que solo puede obtenerse entre operaciones sobre tipos atómicos. Las operaciones sobre una estructura de datos (como el bloqueo de un *mutex*) pueden proporcionar esta relación si dicha estructura contiene tipos atómicos y las operaciones que se realizan sobre ella ejecutan internamente las operaciones atómicas adecuadas, pero en esencia esta relación solo surge a partir de operaciones sobre tipos atómicos.
+
+La idea básica es la siguiente, una operación etiquetada adecuadamente de escritura atómica `W`, realizada sobre una variable `x`, se sincroniza (*synchronizes-with*) con una operación etiquetada adecuadamente de lectura atómica, sobre `x` que lea el valor almacenado por una de estas:
+
+- Esa misma escritura `W`
+- Una escritura atómica posterior sobre `x` realizada por el mismo hilo que realizó la escritura inicial `W`
+- Una secuencia de operaciones atómicas de *read-modify-write* sobre `x` (como `fetch_add()` o `compare_exchange_weak()`) realizadas por cualquier hilo, siempre que el valor leído por el primer hilo de la secuencia sea el valor escrito por `W`
+
+Dejando de lado por ahora la parte de "etiquetada adecuadamente", porque todas las operaciones sobre tipos atómicos están etiquetadas de forma adecuada por defecto. Esto significa lo que cabría esperar, si el hilo *A* almacena un valor y el hilo *B* lee ese valor, existe una relación *synchronizes-with* entre el `store` del hilo *A* y el `load` del hilo *B*, como en Figure [res/006_002].
+
+Todos los matices están precisamente en la parte de “etiquetada adecuadamente”. El modelo de memoria de C++ permite aplicar distintas restricciones de orden a las operaciones sobre tipos atómicos, y a estas restricciones es a lo que se refiere dicha etiqueta.
+
+## La relación happens-before
+
+Las relaciones *happens-before* y *strongly-happens-before* son los bloques fundamentales del orden de operaciones en un programa, especifican qué operaciones ven los efectos de cuáles otras. Para un único hilo, esto es en gran medida sencillo, si una operación está secuenciada antes de otra, entonces sucede antes *happens-before* y *strongly-happens-before* con respecto a ella. Esto significa que, si una operación *A* aparece en el código fuente antes que otra *B* dentro de una sentencia, entonces *A* *happens-before* *B*, y *A* *strongly-happens-before* *B*.
+
+Como se vió en Listing [reader_writer], la escritura de data ocurre antes que la escritura de `data_ready`. Si las operaciones ocurren dentro de la misma sentencia, por lo general no existe una relación *happens-before* entre ellas, porque no están ordenadas. Esta es otra forma de decir que el orden es no especificado.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <iostream>
+
+void foo(int a,int b) {
+    std::cout << a << "," << b << std::endl;
+}
+
+int get_num() {
+    static int i=0;
+    return ++i;
+}
+
+int main() {
+    foo(get_num(), get_num());
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [unspecified_order]: El orden de la evaluación de argumentos a una función no está especificado]
+
+En Listing [unspecified_order] el resultado será `1,2` o `2,1`, pero no está especificado cual de los dos, puesto que el orden de las dos llamadas a `get_num()` no está definido con mayor precisión.
+
+Existen circunstancias en las que las operaciones dentro de una misma sentencia sí están secuenciadas, como cuando se utiliza el operador *coma* integrado del lenguaje o cuando el resultado de una expresión se emplea como argumento de otra expresión. Pero, en general, las operaciones dentro de una sola sentencia no están secuenciadas, y no existe entre ellas una relación *sequenced-before* (y, por tanto, tampoco *happens-before*). Todas las operaciones de una sentencia ocurren antes que todas las operaciones de la sentencia siguiente.
+
+Esto no es más que una reformulación de las reglas de secuenciación en un solo hilo habituales. La novedad es la interacción entre hilos, si la operación *A* en un hilo sucede antes que la operación *B* de otro hilo, entonces *A* *happens-before* *B*. Esto, por sí solo, no parece aportar mucho, se ha añadido una nueva relación (*inter-thread happens-before*), pero resulta fundamental cuando se escribe código multihilo.
+
+En el nivel más básico, *inter-thread happens-before* es relativamente sencillo y se apoya en la relación *synchronizes-with* introducida antes,
+si la operación *A* de un hilo se sincroniza con la operación *B* de otro hilo, entonces *A* *inter-thread happens-before* *B*. Además, es una relación transitiva, si *A* *inter-thread happens-before* *B* y *B* *inter-thread happens-before* *C*, entonces *A* *inter-thread happens-before* *C*. Como se vió en Listing [reader_writer].
+
+La relación *inter-thread happens-before* también se combina con *sequenced-before*, si la operación *A* está secuenciada antes que la operación *B*, y la operación *B* *inter-thread happens-before* la operación *C*, entonces *A* *inter-thread happens-before* *C*. De forma similar, si *A* se sincroniza con *B* y *B* está secuenciada antes que *C*, entonces *A* *inter-thread happens-before* *C*. Estas dos reglas combinadas implican que, si se realizan una serie de cambios sobre datos en un único hilo, solo se necesita una única relación *synchronizes-with* para que los datos sean visibles para las operaciones posteriores del hilo que ejecuta *C*.
+
+La relación *strongly-happens-before* es ligeramente distinta, aunque en la mayoría de los casos el resultado práctico es el mismo. Se aplican las mismas dos reglas descritas anteriormente, si la operación *A* se sincroniza con la operación *B*, o si la operación *A* está secuenciada antes que la operación *B*, entonces *A* *strongly-happens-before* *B*. El orden transitivo también se aplica, si *A* *strongly-happens-before* *B* y *B* *strongly-happens-before* *C*, entonces *A* *strongly-happens-before* *C*.
+
+La diferencia es que las operaciones etiquetadas con `memory_order_consume` participan en relaciones *inter-thread happens-before* (y por tanto *happens-before*), pero no en relaciones *strongly-happens-before*. Dado que la inmensa mayoría del código no debería utilizar `memory_order_consume`, esta distinción difícilmente afectará en la práctica.
+
+Estas son las reglas cruciales que imponen el orden de las operaciones entre hilos y hacen que todo lo mostrado en Listing [reader_writer] funcione correctamente. Existen algunos matices adicionales relacionados con las dependencias de datos, como se verá en breve.
+
+## Ordenamiento de memoria para operaciones atómicas
+
+Existen seis opciones de orden de memoria que pueden aplicarse a las operaciones sobre tipos atómicos
+
+- `memory_order_relaxed`
+- `memory_order_consume`
+- `memory_order_acquire`
+- `memory_order_release`
+- `memory_order_acq_rel`
+- `memory_order_seq_cst`
+
+A menos que se especifique lo contrario para una operación concreta, la opción de orden de memoria utilizada por todas las operaciones sobre tipos atómicos es` memory_order_seq_cst`, que es la más estricta de las opciones disponibles.
+
+Aunque existen seis opciones de ordenamiento, en realidad representan tres modelos
+
+- Orden secuencialmente consistente (`memory_order_seq_cst`)
+- Orden acquire-release (`memory_order_consume`, `memory_order_acquire`, `memory_order_release` y `memory_order_acq_rel`)
+- Orden relajado (`memory_order_relaxed`)
+
+Estos modelos de orden de memoria pueden tener costes distintos según la arquitectura de la CPU. Por ejemplo, en sistemas basados en arquitecturas que permiten un control fino sobre la visibilidad de las operaciones para procesadores distintos de aquel que realiza el cambio, pueden ser necesarias instrucciones adicionales de sincronización para el orden *secuencialmente consistente* frente al orden *acquire-release* o *relajado*, y el orden *acquire-release* frente al orden *relajado*. Si estos sistemas disponen de muchos procesadores, dichas instrucciones adicionales de sincronización pueden consumir una cantidad significativa de tiempo, reduciendo el rendimiento global del sistema.
+
+Por otro lado, las CPUs que utilizan las arquitecturas x86 o x86-64 (como los procesadores Intel y AMD habituales en ordenadores de sobremesa) no requieren instrucciones adicionales para el orden *acquire-release* más allá de las necesarias para garantizar la atomicidad. Incluso el orden *secuencialmente consistente* no necesita ningún tratamiento especial para las operaciones de carga (*load*), aunque sí implica un pequeño coste adicional en las operaciones de almacenamiento (*store*).
+
+La disponibilidad de estos distintos modelos de orden de memoria permite a los expertos aprovechar el mayor rendimiento que ofrecen las relaciones de orden más finas cuando resulta ventajoso, mientras que se puede seguir utilizando el orden *secuencialmente consistente* por defecto,considerablemente más sencillo de razonar que los demás, en aquellos casos menos críticos.
+
+Para poder elegir qué modelo de orden utilizar, o para comprender las relaciones de orden presentes en código que emplea distintos modelos, es importante conocer cómo afectan estas elecciones al comportamiento del programa.
+
+### Ordenamiento *secuencialmente consistente*
+
+El orden por defecto se denomina *secuencialmente consistente* porque implica que el comportamiento del programa es coherente con una visión secuencial simple del mundo. Si todas las operaciones sobre instancias de tipos atómicos son secuencialmente consistentes, el comportamiento de un programa multihilo es como si todas esas operaciones se ejecutaran en una secuencia concreta por un único hilo. Este es, con diferencia, el orden de memoria más fácil de entender, razón por la cual es el valor por defecto, todos los hilos deben observar el mismo orden de las operaciones. Esto facilita enormemente razonar sobre el comportamiento del código escrito con variables atómicas. Puedes escribir todas las posibles secuencias de operaciones de los distintos hilos, eliminar aquellas que sean inconsistentes y verificar que tu código se comporta correctamente en las restantes. También significa que las operaciones no pueden reordenarse, si en un hilo una operación aparece antes que otra, ese mismo orden debe ser observado por todos los demás hilos.
+
+Desde el punto de vista de la sincronización, una operación *store* *secuencialmente consistente* sincroniza con una operación *load* *secuencialmente consistente* sobre la misma variable que lea el valor almacenado. Esto proporciona una restricción de orden entre las operaciones de dos (o más) hilos, pero la consistencia secuencial es más potente que eso. Cualquier operación atómica *secuencialmente consistente* realizada después de dicha lectura también debe aparecer después del almacenamiento para los demás hilos del sistema que utilicen operaciones atómicas secuencialmente consistentes. El ejemplo en Listing [seq_cst] demuestra esta restricción de orden en acción. Esta restricción no se propaga a los hilos que utilicen operaciones atómicas con orden de memoria *relajado*, dichos hilos aún pueden observar las operaciones en un orden diferente. Por tanto, para beneficiarse plenamente de la consistencia secuencial, todos los hilos deben utilizar operaciones *secuencialmente consistentes*.
+
+Sin embargo, esta facilidad de comprensión puede tener un coste. En máquinas con orden débil y muchos procesadores, puede imponer una penalización apreciable de rendimiento, ya que la secuencia global de operaciones debe mantenerse coherente entre los procesadores, lo que puede requerir operaciones de sincronización extensas y costosas entre ellos.
+
+Dicho esto, algunas arquitecturas de procesador (como las comunes x86 y x86-64) ofrecen *consistencia secuencial* a un coste relativamente bajo. Por ello, si el impacto en el rendimiento es un factor al considerar usar este tipo de orden, conviene consultar la documentación de las arquitecturas objetivo.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <atomic>
+#include <thread>
+#include <assert.h>
+
+std::atomic<bool> x,y;
+std::atomic<int> z;
+
+void write_x() {
+    x.store(true, std::memory_order_seq_cst);
+}
+
+void write_y() {
+    y.store(true, std::memory_order_seq_cst);
+}
+
+void read_x_then_y() {
+    while(!x.load(std::memory_order_seq_cst));
+    if(y.load(std::memory_order_seq_cst))
+        ++z;
+}
+
+void read_y_then_x() {
+    while(!y.load(std::memory_order_seq_cst));
+    if(x.load(std::memory_order_seq_cst))
+        ++z;
+}
+
+int main() {
+    x=false;
+    y=false;
+    z=0;
+    std::thread a(write_x);
+    std::thread b(write_y);
+    std::thread c(read_x_then_y);
+    std::thread d(read_y_then_x);
+    a.join();
+    b.join();
+    c.join();
+    d.join();
+    assert(z.load()!=0);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [seq_cst]: Secuencialmente consistente implica un orden total]
+
+En este código se muestra la *consistencia secuencial* en funcionamiento. Las cargas (*loads*) y almacenamientos (*stores*) sobre `x` e `y` están etiquetados explícitamente con `memory_order_seq_cst`, aunque en este caso la etiqueta podría omitirse, ya que es el valor por defecto.
+
+El `assert` nunca saltará, porque o bien la escritura a `x` o bien la escritura a `y` debe ocurrir primero, aunque no esté especificado cuál. Si la lectura de `y` en `read_x_then_y` devuelve `false`, entonces la escritura a `x` debe ocurrir antes de la escritura a `y`, en cuyo caso la lectura de `x` en `read_y_then_x` debe devolver `true`, porque el bucle `while` garantiza que `y` es `true` en ese punto. Debido a que la semántica de `memory_order_seq_cst` requiere un único orden total sobre todas las operaciones etiquetadas con `memory_order_seq_cst`, existe una relación de orden implícita entre la lectura de `y` que devuelve `false` y la escritura a `y`. Para que exista un orden total único, si un hilo ve `x==true` y luego ve `y==false`, esto implica que la escritura a `x` ocurre antes que la escritura a `y` en este orden total.
+
+Por simetría, también podría ocurrir lo contrario, la lectura de `x` devuelve `false`, lo que fuerza que la lectura de `y` devuelva `true`. En ambos casos, `z` es igual a `1`. Ambas lecturas pueden devolver `true`, lo que lleva a `z` siendo `2`, pero bajo ninguna circunstancia `z` puede ser `0`.
+
+Las operaciones y las relaciones *happens-before* para el caso en que `read_x_then_y` vea `x` como `true` y `y` como `false` se muestran en Figure [res/006_003]. La línea discontinua desde la lectura de `y` en `read_x_then_y` hasta la escritura de `y` en `write_y` muestra la relación de orden implícita requerida para mantener la consistencia secuencial, la lectura debe ocurrir antes que la escritura en el orden global de operaciones `memory_order_seq_cst` para que se obtengan los resultados indicados.
+
+![Figure [res/006_003]: *Consistencia secuencial* y *happens-before*](res/006_003.png)
+
+La *consistencia secuencial* es la forma más directa e intuitiva de ordenamiento, pero también es la más costosa en términos de rendimiento, porque requiere sincronización global entre todos los hilos. En un sistema multiprocesador, esto puede implicar comunicación extensa y lenta entre procesadores.
+
+Para evitar este coste de sincronización, es necesario salir del mundo de la *consistencia secuencial* y considerar el uso de otros ordenamientos de memoria, como *acquire-release* o *relaxed*, que permiten más flexibilidad y mejor rendimiento en determinadas situaciones.
+
+### Ordenamientos *No Secuencialmente Consistentes*
+
+Una vez se sale del agradable mundo secuencialmente consistente, las cosas empiezan a complicarse. Probablemente el mayor reto al que hay que enfrentarse es el hecho de que ya *no existe un único orden global de los eventos*. Esto significa que distintos hilos pueden ver diferentes vistas de las mismas operaciones, y cualquier modelo mental que se tenga en el que las operaciones de distintos hilos se intercalan ordenadamente una tras otra debe descartarse. No solo hay que tener en cuenta que las cosas pueden ocurrir realmente de forma concurrente, sino que además *los hilos no tienen por qué estar de acuerdo en el orden de los eventos*. Para poder escribir (o incluso entender) cualquier código que utilice un orden de memoria distinto del predeterminado `memory_order_seq_cst`, es absolutamente vital asimilar esto. No se trata solo de que el compilador pueda reordenar las instrucciones. Incluso si los hilos están ejecutando exactamente el mismo fragmento de código, pueden discrepar sobre el orden de los eventos debido a operaciones en otros hilos, en ausencia de restricciones explícitas de orden, porque las distintas cachés de CPU y los buffers internos pueden contener valores diferentes para la misma posición de memoria. Es muy importante tenerlo claro, *los hilos no tienen por qué estar de acuerdo en el orden de los eventos*.
+
+No solo hay que abandonar los modelos mentales basados en la intercalación de operaciones, sino también aquellos basados en la idea de que el compilador o el procesador reordenan instrucciones. *En ausencia de otras restricciones de orden, el único requisito es que todos los hilos coincidan en el orden de modificación de cada variable individual*. Las operaciones sobre variables distintas pueden aparecer en órdenes diferentes en distintos hilos, siempre que los valores observados sean coherentes con cualquier restricción adicional de orden que se haya impuesto.
+
+Esto se demuestra mejor saliendo por completo del mundo secuencialmente consistente y utilizando `memory_order_relaxed` para todas las operaciones. Una vez que se ha asimilado esto, se puede volver al orden *acquire-release*, que permite introducir de forma selectiva relaciones de orden entre operaciones y volver a la cordura.
+
+### Ordenamiento *Relajado*
+
+Las operaciones sobre tipos atómicos realizadas con ordenación *relaxed* no participan en relaciones *synchronizes-with*. Las operaciones sobre la misma variable dentro de un mismo hilo siguen obedeciendo las relaciones *happens-before*, pero apenas existen requisitos de orden en relación con otros hilos. El único requisito es que los accesos a una misma variable atómica desde el mismo hilo no pueden reordenarse, una vez que un hilo ha observado un determinado valor de una variable atómica, una lectura posterior realizada por ese mismo hilo no puede recuperar un valor anterior de dicha variable. Sin ninguna sincronización adicional, el orden de modificación de cada variable es lo único que comparten entre sí los hilos que utilizan `memory_order_relaxed`.
+
+Para demostrar hasta qué punto pueden llegar a ser *relajadas* las operaciones `relaxed`, solo se necesitan dos hilos, como se muestra en el siguiente listado.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <atomic>
+#include <thread>
+#include <assert.h>
+
+std::atomic<bool> x,y;
+std::atomic<int> z;
+
+void write_x_then_y() {
+    x.store(true, std::memory_order_relaxed);
+    y.store(true, std::memory_order_relaxed);
+}
+
+void read_y_then_x() {
+    while(!y.load(std::memory_order_relaxed));
+
+    if(x.load(std::memory_order_relaxed))
+        ++z;
+}
+
+int main() {
+    x = false;
+    y = false;
+    z = 0;
+    std::thread a(write_x_then_y);
+    std::thread b(read_y_then_x);
+    a.join();
+    b.join();
+    assert(z.load()!=0);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [relaxed]: Las operaciones *relaxed* tienen pocos requisitos de orden]
+
+Esta vez, el `assert` puede saltar, porque la lectura de `x` puede obtener `false`, aunque la lectura de `y` obtenga `true` y la escritura de `x` ocurra antes que la escritura de `y`. `x` e `y` son variables distintas, por lo que no existen garantías de orden relativas a la visibilidad de los valores derivados de las operaciones sobre cada una de ellas.
+
+Las operaciones *relaxed* sobre variables distintas pueden reordenarse libremente siempre que respeten cualquier relación *happens-before* a la que estén sujetas (por ejemplo, dentro del mismo hilo). No introducen relaciones *synchronizes-with*. Las relaciones *happens-before* de Listing [relaxed] se muestran en Figure [res/006_004], junto con un posible resultado.
+
+![Figure [res/006_004]: Atómicos *relaxed* y *happens-before*](res/006_004.png)
+
+Aunque existe una relación *happens-before* entre las escrituras y también entre las lecturas, no existe tal relación entre ninguna escritura y ninguna lectura, por lo que las lecturas pueden observar las escrituras en un orden diferente.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <thread>
+#include <atomic>
+#include <iostream>
+
+std::atomic<int> x(0),y(0),z(0);
+std::atomic<bool> go(false);
+unsigned const loop_count=10;
+
+struct read_values {
+    int x,y,z;
+};
+
+read_values values1[loop_count];
+read_values values2[loop_count];
+read_values values3[loop_count];
+read_values values4[loop_count];
+read_values values5[loop_count];
+
+void increment(std::atomic<int>* var_to_inc,read_values* values) {
+    while(!go)          //spin, waiting for the signal
+        std::this_thread::yield();
+
+    for(unsigned i = 0; i < loop_count; ++i) {
+        values[i].x = x.load(std::memory_order_relaxed);
+        values[i].y = y.load(std::memory_order_relaxed);
+        values[i].z = z.load(std::memory_order_relaxed);
+        var_to_inc->store(i+1, std::memory_order_relaxed);
+        std::this_thread::yield();
+    }
+}
+
+void read_vals(read_values* values) {
+    while(!go)          //spin, waiting for the signal
+        std::this_thread::yield();
+
+    for(unsigned i = 0; i < loop_count; ++i) {
+        values[i].x = x.load(std::memory_order_relaxed);
+        values[i].y = y.load(std::memory_order_relaxed);
+        values[i].z = z.load(std::memory_order_relaxed);
+        std::this_thread::yield();
+    }
+}
+
+void print(read_values* v) {
+    for(unsigned i = 0;i < loop_count;++i) {
+        if(i) {
+            std::cout << ",";
+        }
+        std::cout << "(" << v[i].x << "," << v[i].y << "," << v[i].z << ")";
+    }
+    std::cout << std::endl;
+}
+
+int main() {
+    std::thread t1(increment,&x,values1);
+    std::thread t2(increment,&y,values2);
+    std::thread t3(increment,&z,values3);
+    std::thread t4(read_vals,values4);
+    std::thread t5(read_vals,values5);
+
+    go=true;
+
+    t5.join();
+    t4.join();
+    t3.join();
+    t2.join();
+    t1.join();
+
+    print(values1);
+    print(values2);
+    print(values3);
+    print(values4);
+    print(values5);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [relaxed_multi]: Operaciones *relaxed* en varios hilos]
+
+Este ejemplo es ligeramente más complejo, con tres variables y cinco hilos. Se tienen tres variables atómicas globales compartidas y cinco hilos. Cada hilo ejecuta un bucle 10 veces, leyendo los valores de las tres variables atómicas utilizando `memory_order_relaxed` y almacenándolos en un `array`. Tres de los hilos actualizan, en cada iteración del bucle, una de las variables atómicas, mientras que los otros dos hilos solo realizan lecturas. Una vez que todos los hilos han terminado (*joined*), se imprimen los valores de los arrays almacenados por cada hilo.
+
+La variable atómica `go` se utiliza para asegurar que todos los hilos comiencen el bucle aproximadamente al mismo tiempo. Lanzar un hilo es una operación costosa y, sin este retraso explícito, el primer hilo podría terminar antes de que el último haya comenzado. Cada hilo espera a que `go` se vuelva `true` antes de entrar en su bucle principal, y `go` se establece en `true` únicamente una vez que todos los hilos han arrancado.
+
+Una posible salida de este programa es la siguiente:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+(0,0,0),(1,0,0),(2,0,0),(3,0,0),(4,0,0),(5,7,0),(6,7,8),(7,9,8),(8,9,8),(9,9,10)
+(0,0,0),(0,1,0),(0,2,0),(1,3,5),(8,4,5),(8,5,5),(8,6,6),(8,7,9),(10,8,9),(10,9,10)
+(0,0,0),(0,0,1),(0,0,2),(0,0,3),(0,0,4),(0,0,5),(0,0,6),(0,0,7),(0,0,8),(0,0,9)
+(1,3,0),(2,3,0),(2,4,1),(3,6,4),(3,9,5),(5,10,6),(5,10,8),(5,10,10),(9,10,10),(10,10,10)
+(0,0,0),(0,0,0),(0,0,0),(6,3,7),(6,5,7),(7,7,7),(7,8,7),(8,8,7),(8,8,9),(8,8,9)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [relaxed_output]: Posible *output*]
+
+Las tres primeras líneas corresponden a los hilos que realizan las actualizaciones, y las dos últimas a los hilos que solo leen. Cada triplete representa un conjunto de los valores de las variables `x`, `y` y `z`, en ese orden, correspondientes a una iteración del bucle. Hay varios aspectos destacables en esta salida:
+
+- El primer conjunto de valores muestra cómo `x` aumenta en uno en cada triplete, el segundo conjunto muestra `y` aumentando en uno, y el tercero muestra `z` aumentando en uno.
+- Los elementos `x` de cada triplete solo aumentan dentro de un mismo conjunto, al igual que los elementos `y` y `z`, pero los incrementos no son uniformes y los órdenes relativos varían entre todos los hilos.
+- El hilo 3 no observa ninguna de las actualizaciones de `x` ni de `y`, solo ve las actualizaciones que él mismo realiza sobre `z`. Sin embargo, esto no impide que los otros hilos vean las actualizaciones de `z` mezcladas con las de `x` y `y`.
+
+Este es un resultado válido para operaciones *relaxed*, pero no es el único posible. Cualquier conjunto de valores que sea coherente con que las tres variables tomen sucesivamente los valores de 0 a 10, y en el que el hilo que incrementa una variable determinada imprima los valores de 0 a 9 para esa variable, es igualmente válido.
+
+### Trabajando con ordenamiento *Relajado*
+
+Para entender cómo funciona esto, se puede imaginar que cada variable es un hombre en un cubículo con una libreta. En su libreta hay una lista de valores. Se le puede llamar por teléfono y pedirle que diga un valor, o se le puede decir que anote uno nuevo. Si se le dice que anote un nuevo valor, lo escribe al final de la lista. Si se le pide un valor, te lee un número de la lista.
+
+La primera vez que se habla con este hombre, si se le pide un valor, puede darte cualquiera de los que tenga en su libreta en ese momento. Si después se le vuelve a pedir otro valor, puede dar el mismo de nuevo o uno que esté más abajo en la lista. Nunca dará un valor que esté más arriba. Si se le dice que escriba un número y luego se le pide un valor, dará o bien el número que se le dijo que anotara o uno que esté por debajo de ese en la lista.
+
+En un momento determinado su lista empieza con los valores 5, 10, 23, 3, 1 y 2. Si se le pide un valor, podría dar cualquiera de ellos. Si da 10, la siguiente vez podría darte 10 otra vez, o cualquiera de los posteriores, pero no 5. Si se le llama cinco veces, podría decir, por ejemplo, "10, 10, 1, 2, 2". Si se le pide que escriba 42, lo añadirá al final de la lista. Si se le vuelve a pedir un número, seguirá diciéndo "42" hasta que tenga otro número nuevo en la lista y le apetezca decirlo.
+
+Ahora, otra persona también tiene el número de este hombre. Esta persona también puede llamarlo y pedirle que anote un número o que le diga uno, y el hombre aplica las mismas reglas con esta otra persona que con la primera. Solo tiene un teléfono, así que solo puede atender a uno de los dos a la vez, por lo que la lista en su libreta es una lista clara y ordenada. Pero el hecho de que la primera persona le haya pedido que anote un número nuevo no significa que tenga que decírselo a la otra persona, y viceversa. Si la segunda persona le pidió un número y le dijo "23", el hecho de que la primera persona le pidiera que anotara 42 no implica que se lo vaya a decir a la segunda persona la próxima vez. Puede decirle a esta segunda persona cualquiera de los números 23, 3, 1, 2, 42, o incluso el 67 que una tercera persona le pidió que anotara después de la llamada de la primera persona. Perfectamente podría decirle a la segunda persona  "23, 3, 3, 1, 67" sin ser incoherente con lo que le ha dicho a la primera persona. Es como si llevara un registro de qué número le dijo a cada persona con una pequeña nota adhesiva móvil para cada uno.
+
+El siguiente nivel es que no hay solo un hombre en un cubículo, sino toda una oficina llena de cubículos, con muchos hombres con teléfonos y libretas. Esas son todas las variables atómicas. Cada variable tiene su propio orden de modificación (la lista de valores en la libreta), pero no existe ninguna relación entre ellas. Si cada persona que llama es un hilo, esto es exactamente lo que ocurre cuando todas las operaciones utilizan `memory_order_relaxed`. Hay algunas cosas adicionales que se le pueden decir al hombre del cubículo, como "Anota este número y dime cuál era el que estaba al final de la lista" (*exchange*) y "Anota este número si el número que está al final de la lista es este otro, en caso contrario, dime cuál debería haber adivinado" (*compare_exchange_strong*), pero eso no cambia el principio general.
+
+Si se piensa en la lógica del programa en Listing [relaxed], entonces `write_x_then_y` es como alguien que llama al hombre del cubículo `x` y le dice que escriba `true`, y luego llama al hombre del cubículo `y` y le dice que escriba `true`. El hilo que ejecuta `read_y_then_x` llama repetidamente al hombre del cubículo `y` pidiéndole un valor hasta que este diga `true`, y entonces llama al hombre del cubículo `x` para pedirle un valor. El hombre del cubículo `x` no tiene ninguna obligación de darte un valor concreto de su lista y está perfectamente en su derecho de decir `false`.
+
+Esto hace que las operaciones atómicas *relaxed* sean difíciles de manejar. Deben utilizarse en combinación con operaciones atómicas que tengan semánticas de orden más fuertes para que resulten útiles en la sincronización entre hilos. Se recomienda encarecidamente evitar las operaciones atómicas *relaxed* salvo que sean absolutamente necesarias, e incluso en ese caso utilizarlas con extrema precaución. Dado lo contraintuitivos que pueden ser los resultados con solo dos hilos y dos variables en Listing [relaxed], no es difícil imaginar la complejidad posible cuando intervienen más hilos y más variables.
+
+Una forma de lograr sincronización adicional sin el coste de una consistencia secuencial completa es utilizar el orden `acquire-release`.
+
+### Ordenamiento `Acquire-Release`
+
+El orden `acquire-release` es un paso adelante respecto al orden `relaxed`, todavía no existe un orden total de operaciones, pero sí introduce cierta sincronización. Bajo este modelo de orden, las cargas atómicas son operaciones *acquire* (`memory_order_acquire`), las escrituras atómicas son operaciones *release* (`memory_order_release`), y las operaciones atómicas de *lectura-modificación-escritura* (como `fetch_add()` o `exchange()`) pueden ser *acquire*, *release* o ambas (`memory_order_acq_rel`).
+
+La sincronización se produce de forma pareja entre el hilo que realiza la operación *release* y el hilo que realiza la operación *acquire*. Una operación *release* se sincroniza con una operación *acquire* que lea el valor escrito. Esto significa que distintos hilos todavía pueden ver órdenes diferentes, pero esos órdenes están restringidos.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <atomic>
+#include <thread>
+#include <assert.h>
+
+std::atomic<bool> x,y;
+std::atomic<int> z;
+
+void write_x() {
+    x.store(true, std::memory_order_release);
+}
+
+void write_y() {
+    y.store(true, std::memory_order_release);
+}
+
+void read_x_then_y() {
+    while(!x.load(std::memory_order_acquire));
+    if(y.load(std::memory_order_acquire))
+        ++z;
+}
+
+void read_y_then_x() {
+    while(!y.load(std::memory_order_acquire));
+    if(x.load(std::memory_order_acquire))
+        ++z;
+}
+
+int main() {
+    x = false;
+    y = false;
+    z = 0;
+
+    std::thread a(write_x);
+    std::thread b(write_y);
+    std::thread c(read_x_then_y);
+    std::thread d(read_y_then_x);
+
+    a.join();
+    b.join();
+    c.join();
+    d.join();
+
+    assert(z.load() != 0);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [rel_acq]: *Acquire-release* no implica un orden total]
+
+Listing [rel_acq] es una reescritura de Listing [seq_cst] utilizando la semántica *acquire-release* en lugar de la secuencialmente consistente. En este caso, el `assert` puede activarse (como en el caso de orden *relaxed*), porque es posible que tanto la lectura de `x` como la lectura de `y` devuelvan `false`. `x` e `y` son escritas por hilos diferentes, por lo que el orden desde el *release* hasta el *acquire* en cada caso no tiene efecto sobre las operaciones de los otros hilos.
+
+![Figure [res/006_005]: *Acquire-release* y *happens-before*](res/006_005.png)
+
+Figure [res/006_005] muestra las relaciones *happens-before* de Listing [rel_acq], junto con un posible resultado en el que los dos hilos lectores tienen cada uno una visión distinta del estado del mundo. Esto es posible porque no existe una relación *happens-before* que fuerce un orden, tal como se explicó anteriormente.
+
+Para poder apreciar el beneficio del orden *acquire-release*, se necesita considerar dos escrituras realizadas desde el mismo hilo, como en Listing [relaxed]. Si se cambia la escritura en `y` para que utilice `memory_order_release` y la lectura de `y` para que utilice `memory_order_acquire`, como en Listing [acq_rel], entonces se impone un orden sobre las operaciones en `x`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <atomic>
+#include <thread>
+#include <assert.h>
+
+std::atomic<bool> x,y;
+std::atomic<int> z;
+
+void write_x_then_y() {
+    x.store(true, std::memory_order_relaxed);
+    y.store(true, std::memory_order_release);
+}
+
+void read_y_then_x() {
+    while(!y.load(std::memory_order_acquire));  // Spin, waiting for y to be set to true
+
+    if(x.load(std::memory_order_relaxed))
+        ++z;
+}
+
+int main() {
+    x = false;
+    y = false;
+    z = 0;
+
+    std::thread a(write_x_then_y);
+    std::thread b(read_y_then_x);
+
+    a.join();
+    b.join();
+    assert(z.load()!=0);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [acq_rel]: Las operaciones *acquire-release* pueden imponer orden en las operaciones *relaxed*]
+
+Eventualmente, la lectura de `y` verá `true`, tal como fue escrito por la escritura. Como la escritura utiliza `memory_order_release` y la lectura utiliza `memory_order_acquire`, la escritura se sincroniza con la lectura. La escritura en `x` ocurre antes que la escritura en `y` porque ambas están en el mismo hilo. Dado que la escritura en `y` se sincroniza con la lectura de `y`, la escritura en `x` también ocurre antes que la lectura de `y` y, por extensión, antes que la lectura de `x`. Por lo tanto, la lectura de `x` debe devolver `true`, y el assert no puede activarse.
+
+Si la lectura de `y` no estuviera dentro de un bucle `while`, esto no necesariamente sería así, la lectura de `y` podría devolver `false`, en cuyo caso no habría ningún requisito sobre el valor leído de `x`. Para que haya sincronización, las operaciones *acquire* y *release* deben emparejarse. El valor escrito por una operación *release* debe ser visto por una operación *acquire* para que cualquiera de las dos tenga efecto. Si la escritura de `y` o la lectura de `y` fueran operaciones *relaxed*, no habría orden sobre los accesos a `x`, por lo que no habría garantía de que la lectura de `x` devolviera `true`, y el assert podría saltar.
+
+Se puede pensar en el orden *acquire-release* usando el  modelo de los hombres con libretas en sus cubículos, pero hay que añadir más detalles al modelo. Primero, cada escritura forma parte de un lote de actualizaciones. Cuando se llama a un hombre para que anote un número, también se le indicas a qué lote pertenece la actualización, "Por favor, anota 99 como parte del lote 423". Para la última escritura de un lote, también se le dice, "Por favor, anota 147, que es la última escritura del lote 423". El hombre del cubículo registrará esta información, junto con quién le dio el valor. Esto modela una operación *store-release*. La siguiente vez que se le pida que escriba un valor, se aumenta el número de lote, "Por favor, anota 41 como parte del lote 424".
+
+Cuando se le pide un valor, ahora se tiene una elección, se puede pedir solo un valor (una lectura *relaxed*), en cuyo caso el hombre solo da el número, o se le puede pedir un valor e información sobre si es el último del lote (lo que modela una lectura *load-acquire*). Si se le pide la información del lote y el valor no era el último del lote, el hombre dirá algo como. "El número es 987, que es un valor 'normal'". Si era el último del lote, dirá algo como, "El número es 987, que es el último número del lote 956 de la persona X". Aquí es donde entran en juego las semánticas *acquire-release*, si se le indican al hombre todos los lotes que se conocen al pedir un valor, él buscará en su lista el último valor de cualquiera de los lotes que se conocen y dará ese número o uno más adelante en la lista.
+
+¿Cómo modela esto la semántica acquire-release? En Listing [acq_rel], primero, el hilo `a` está ejecutando `write_x_then_y` y le dice al hombre del cubículo `x`, "Por favor, anota `true` como parte del lote `1` del hilo `a`", lo cual él registra correctamente. Luego, el hilo `a` le dice al hombre del cubículo `y`, "Por favor, anota `true` como la última escritura del lote `1` del hilo `a`" y él también lo registra.
+
+Mientras tanto, el hilo `b` está ejecutando `read_y_then_x`. El hilo `b` sigue preguntando al hombre del cubículo `y` por un valor con información del lote hasta que le dice `true`. Puede que tenga que preguntar muchas veces, pero finalmente el hombre dirá `true`. Además de decir `true`, el hombre del cubículo `y` también indica, "Esta es la última escritura del lote `1` del hilo `a`".
+
+Ahora, el hilo `b` procede a pedir un valor al hombre del cubículo `x`, pero esta vez dice, "Por favor, ¿puedo obtener un valor?, y, por cierto, sé del lote `1` del hilo `a`". Entonces, el hombre del cubículo `x` tiene que buscar en su lista la última mención del lote `1` del hilo `a`. La única mención que tiene es el valor `true`, que además es el último valor en su lista, por lo que debe devolver ese valor, de lo contrario, estaría rompiendo las reglas del juego.
+
+Si se revisa la definición de *inter-thread* *happens-before* en Section [La relación happens-before], una de sus propiedades importantes es que es transitiva, si `A` *inter-thread* *happens-before* `B` y `B` *inter-thread* *happens-before* `C`, entonces `A` *inter-thread* *happens-before* `C`. Esto significa que el orden *acquire-release* puede usarse para sincronizar datos entre varios hilos, incluso cuando los hilos intermedios no han modificado esos datos.
+
+### Sincronización transitiva con ordenamiento `Acquire-Release`
+
+Para poder razonar sobre el orden transitivo, se necesitan al menos tres hilos. El primer hilo modifica algunas variables compartidas y realiza un *store-release* sobre una de ellas. Un segundo hilo lee esa variable mediante un *load-acquire* y, a continuación, realiza un *store-release* sobre una segunda variable compartida. Finalmente, un tercer hilo realiza un *load-acquire* sobre esa segunda variable compartida. Siempre que las operaciones *load-acquire* vean los valores escritos por las operaciones *store-release*, de modo que se establezcan las relaciones *synchronizes-with*, este tercer hilo podrá leer los valores de las otras variables que fueron escritas por el primer hilo, incluso aunque el hilo intermedio no haya accedido a ninguna de ellas.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::atomic<int> data[5];
+std::atomic<bool> sync1(false),sync2(false);
+
+void thread_1() {
+    data[0].store(42, std::memory_order_relaxed);
+    data[1].store(97, std::memory_order_relaxed);
+    data[2].store(17, std::memory_order_relaxed);
+    data[3].store(-141, std::memory_order_relaxed);
+    data[4].store(2003, std::memory_order_relaxed);
+    sync1.store(true,std::memory_order_release);    // set sync1
+}
+
+void thread_2() {
+    while(!sync1.load(std::memory_order_acquire));  // loop until sync1 is set
+    sync2.store(true,std::memory_order_release);    // set sync2
+}
+
+void thread_3() {
+    while(!sync2.load(std::memory_order_acquire));  //loop until sync2 is set
+    assert(data[0].load(std::memory_order_relaxed) == 42);
+    assert(data[1].load(std::memory_order_relaxed) == 97);
+    assert(data[2].load(std::memory_order_relaxed) == 17);
+    assert(data[3].load(std::memory_order_relaxed) == -141);
+    assert(data[4].load(std::memory_order_relaxed) == 2003);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [trans]: Sincronización transitiva usando orden *acquire-release*]
+
+Aunque el hilo 2 solo accede a las variables `sync1` y `sync2`, eso es suficiente para establecer la sincronización entre el hilo 1 y el hilo 3 y garantizar que los asserts no se activen. En primer lugar, las escrituras sobre `data` realizadas por el hilo 1 ocurren antes que la escritura en `sync1` porque están secuenciadas antes dentro del mismo hilo. Dado que la lectura de `sync1` está dentro de un bucle `while`, eventualmente verá el valor escrito por el hilo 1 y formará la segunda mitad del par *release-acquire*. Por tanto, la escritura en `sync1` ocurre antes que la última lectura de `sync1` dentro del bucle. Esa lectura está secuenciada antes (y, por tanto, ocurre antes) que la escritura en `sync2`, que a su vez forma un par *release-acquire* con la última lectura del bucle `while` en el hilo 3. La escritura en `sync2` ocurre, por tanto, antes que la lectura, que a su vez ocurre antes que las lecturas de `data`.
+
+Debido al carácter transitivo de *happens-before*, se puede encadenar toda la relación, las escrituras en `data` ocurren antes que la escritura en `sync1`, que ocurre antes que la lectura de `sync1`, que ocurre antes que la escritura en `sync2`, que ocurre antes que la lectura de `sync2`, que ocurre antes que las lecturas de `data`. Así, las escrituras en `data` realizadas por el hilo 1 ocurren antes que las lecturas de `data` en el hilo 3, y los asserts no saltan.
+
+En este caso, se podría combinar `sync1` y `sync2` en una única variable utilizando una operación de *lectura-modificación-escritura* con `memory_order_acq_rel` en el hilo 2. Una opción sería usar `compare_exchange_strong()` para asegurar que el valor se actualice solo una vez que se haya observado la escritura realizada por el hilo 1.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::atomic<int> sync(0);
+
+void thread_1() {
+    // ...
+    sync.store(1, std::memory_order_release);
+}
+
+void thread_2() {
+    int expected = 1;
+    while(!sync.compare_exchange_strong(expected, 2, std::memory_order_acq_rel))
+        expected = 1;
+}
+
+void thread_3() {
+    while(sync.load(std::memory_order_acquire) < 2);
+    // ...
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [trans2]: Sincronización transitiva usando orden *acquire-release* y una sola variable]
+
+Si se utilizan operaciones de *lectura-modificación-escritura* (*read-modify-write*), es importante elegir qué semántica se desea. En este caso, se necesita tanto semántica *acquire* como *release*, por lo que `memory_order_acq_rel` es la opción adecuada, aunque también pueden emplearse otros órdenes. Por ejemplo, una operación `fetch_sub` con semántica `memory_order_acquire` no se sincroniza con nada, aunque escriba un valor, porque no es una operación *release*. De la misma forma, una escritura (*store*) no puede sincronizarse con un `fetch_or` con semántica `memory_order_release`, porque la parte de lectura del `fetch_or` no es una operación *acquire*. Las operaciones de *lectura-modificación-escritura* con semántica `memory_order_acq_rel` se comportan a la vez como *acquire* y como *release*, de modo que una escritura previa puede sincronizarse con dicha operación, y esta puede sincronizarse con una lectura posterior, como ocurre en este ejemplo.
+
+Si se mezclan operaciones *acquire-release* con operaciones secuencialmente consistentes, las lecturas secuencialmente consistentes se comportan como lecturas con semántica *acquire*, y las escrituras secuencialmente consistentes se comportan como escrituras con semántica *release*. Las operaciones secuencialmente consistentes de *lectura-modificación-escritura* se comportan tanto como *acquire* como *release*. Las operaciones *relaxed* siguen siendo *relaxed*, pero quedan sujetas a las relaciones *synchronizes-with* y, en consecuencia, a las relaciones *happens-before* adicionales introducidas mediante el uso de semánticas *acquire-release*.
+
+A pesar de los resultados potencialmente poco intuitivos, cualquiera que haya usado *locks* ya ha tenido que enfrentarse a estos mismos problemas de orden, bloquear un *mutex* es una operación *acquire*, y desbloquearlo es una operación *release*. Con los *mutex*, aprendes que debes asegurarte de que el mismo *mutex* esté bloqueado al leer un valor que lo estaba cuando se escribió, y aquí ocurre lo mismo, las operaciones *acquire* y *release* deben realizarse sobre la misma variable para garantizar el orden. Si los datos están protegidos por un *mutex*, la naturaleza exclusiva del bloqueo hace que el resultado sea indistinguible de lo que habría sido si las operaciones de bloqueo y desbloqueo fueran secuencialmente consistentes. De forma similar, si se utilizan ordenaciones *acquire* y *release* sobre variables atómicas para construir un bloqueo sencillo, desde el punto de vista del código que usa ese bloqueo, el comportamiento parecerá secuencialmente consistente, aunque internamente las operaciones no lo sean.
+
+Si no se necesita la rigurosidad del orden secuencialmente consistente para las operaciones atómicas, la sincronización por pares que ofrece el orden *acquire-release* tiene el potencial de un coste de sincronización mucho menor que el orden global requerido por las operaciones secuencialmente consistentes. El compromiso está en el coste mental necesario para asegurar que el orden funciona correctamente y que el comportamiento poco intuitivo entre hilos no cause problemas.
+
+### Dependencia de datos con ordenamiento *Acquire-Release* y `memory_order_consume`
+
+En la introducción de esta sección se mencionó que `memory_order_consume` formaba parte del modelo de orden *acquire-release*.`memory_order_consume` es especial, gira en torno a las dependencias de datos e introduce matices relacionados con estas dependencias en la relación *inter-thread* *happens-before* descrita en Section [La relación happens-before]. También es especial porque el estándar C++17 recomienda explícitamente no utilizarlo. Por tanto, se cubre aquí solo por completitud, no se debería usar `memory_order_consume` en el código.
+
+El concepto de dependencia de datos es relativamente sencillo: existe una dependencia de datos entre dos operaciones si la segunda opera sobre el resultado de la primera. Existen dos nuevas relaciones asociadas a las dependencias de datos, *dependency-ordered-before* y *carries-a-dependency-to*. Al igual que *sequenced-before*, *carries-a-dependency-to* se aplica estrictamente dentro de un mismo hilo y modela la dependencia de datos entre operaciones, si el resultado de una operación `A` se usa como operando de otra operación `B`, entonces `A` *carries a dependency to* `B`. Si el resultado de la operación `A` es un valor escalar, como un `int`, la relación sigue siendo válida aunque el resultado de `A` se almacene en una variable y esa variable se utilice después como operando de la operación `B`. Esta relación también es transitiva, si `A` tiene una dependencia hacia `B` y `B` hacia `C`, entonces `A` tiene una dependencia hacia `C`.
+
+Por otro lado, la relación *dependency-ordered-before* puede aplicarse entre hilos. Se introduce utilizando operaciones de carga atómica etiquetadas con `memory_order_consume`. Esto es un caso especial de `memory_order_acquire` que limita los datos sincronizados únicamente a las dependencias directas. Una operación de escritura `A` etiquetada con `memory_order_release`, `memory_order_acq_rel` o `memory_order_seq_cst` está *dependency-ordered-before* respecto a una operación de carga `B` etiquetada con `memory_order_consume` si la carga lee el valor escrito. Esto es diferente de la relación *synchronizes-with* que se obtiene si la carga usa `memory_order_acquire`. Si esta operación `B` a su vez *carries a dependency to* otra operación `C`, entonces `A` también está *dependency-ordered-before* `C`.
+
+Esto no serviría de mucho para fines de sincronización si no afectara a la relación *inter-thread* *happens-before*, pero sí lo hace, si `A` está *dependency-ordered-before* `B`, entonces `A` también *inter-thread* *happens-before* `B`.
+
+Un uso importante de este tipo de orden de memoria es cuando la operación atómica carga un puntero a ciertos datos. Al utilizar `memory_order_consume` en la carga y `memory_order_release` en la escritura previa, se garantiza que los datos apuntados estén correctamente sincronizados, sin imponer requisitos de sincronización sobre otros datos no dependientes.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+struct X {
+    int i;
+    std::string s;
+};
+
+std::atomic<X*> p;
+std::atomic<int> a;
+
+void create_x() {
+    X* x = new X;
+    x->i = 42;
+    x->s = "hello";
+    a.store(99, std::memory_order_relaxed);
+    p.store(x, std::memory_order_release);
+}
+
+void use_x() {
+    X* x;
+    while(!(x = p.load(std::memory_order_consume)))
+        std::this_thread::sleep(std::chrono::microseconds(1));
+    assert(x->i == 42);
+    assert(x->s == "hello");
+    assert(a.load(std::memory_order_relaxed) == 99);
+}
+
+int main() {
+    std::thread t1(create_x);
+    std::thread t2(use_x);
+
+    t1.join();
+    t2.join();
+    }
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [consume]: Usar `memory_order_consume` para sincronizar datos]
+
+Aunque la escritura en `a` está secuenciada antes que la escritura en `p`, y la escritura en `p` está etiquetada como `memory_order_release`, la lectura de `p` está etiquetada como `memory_order_consume`. Esto significa que la escritura en `p` solo ocurre antes que aquellas expresiones que dependen del valor cargado desde `p`. Por ello, los asserts sobre los miembros de datos de la estructura `x` están garantizadas a no activarse, porque la lectura de `p` transporta una dependencia hacia esas expresiones a través de la variable `x`. Por el contrario, el assert sobre el valor de `a` puede saltar o no, esta operación no depende del valor cargado desde `p`, y por tanto no existe ninguna garantía sobre el valor que se lea. Esto resulta especialmente evidente porque esa operación está etiquetada como `memory_order_relaxed`, como se puede observar.
+
+En ocasiones, no se quiere la sobrecarga que supone mantener esta cadena de dependencias. Se quiere que el compilador pueda almacenar valores en registros y reordenar operaciones para optimizar el código, en lugar de estar obligado a respetar las dependencias. En estos casos, se puede utilizar `std::kill_dependency()` para romper explícitamente la cadena de dependencias. `std::kill_dependency()` es una sencilla función templatizada que copia el argumento proporcionado al valor de retorno, pero rompe la cadena de dependencia al hacerlo. Por ejemplo, si se tiene un array global de solo lectura y se utiliza `std::memory_order_consume` al obtener desde otro hilo un índice para ese array, se puede` usar `std::kill_dependency()` para indicar al compilador que no necesita volver a leer el contenido de la entrada del array.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+int global_data[] = { ... };
+
+std::atomic<int> index;
+
+void f() {
+    int i = index.load(std::memory_order_consume);
+    do_something_with(global_data[std::kill_dependency(i)]);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [kill_dep]: Uso de `std::kill_dependency()`]
+
+En código real, siempre se debería utilizar `memory_order_acquire` allá donde surja la tentación de usar `memory_order_consume`, y por lo tanto `std::kill_dependency` resulta innecesario.
+
+## Secuencias de liberación y synchronizes-with
+
+En Section [La relación synchronizes-with] se mencionó que podía establecerse una relación *synchronizes-with* entre una escritura (*store*) en una variable atómica y una lectura (*load*) de esa misma variable desde otro hilo, incluso cuando existe una secuencia de operaciones de *lectura-modificación-escritura* entre la escritura y la lectura, siempre que todas las operaciones estén etiquetadas adecuadamente. Ahora que ya se han explicado las posibles etiquetas de orden de memoria, es posible detallar esto con mayor precisión.
+
+Si la escritura está etiquetada con `memory_order_release`, `memory_order_acq_rel` o `memory_order_seq_cst`, y la lectura está etiquetada con `memory_order_consume`, `memory_order_acquire` o `memory_order_seq_cst`, y cada operación de la cadena carga el valor escrito por la operación anterior, entonces esa cadena de operaciones constituye una secuencia de liberación (*release sequence*). En ese caso, la escritura inicial se *synchronizes-with* (para `memory_order_acquire` o `memory_order_seq_cst`) o queda *dependency-ordered-before* (para `memory_order_consume`) respecto a la lectura final. Las operaciones atómicas de *lectura-modificación-escritura* intermedias en la cadena pueden tener cualquier orden de memoria (incluso `memory_order_relaxed`).
+
+Para ver qué significa esto y por qué es importante, se puede considerar un `atomic<int>` utilizado como contador del número de elementos en una cola compartida, como se muestra en el siguiente listado.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <atomic>
+#include <thread>
+
+std::vector<int> queue_data;
+std::atomic<int> count;
+
+void populate_queue() {
+    unsigned const number_of_items = 20;
+    queue_data.clear();
+    for(unsigned i = 0; i < number_of_items; ++i) {
+        queue_data.push_back(i);
+    }
+    count.store(number_of_items, std::memory_order_release);  // initial store
+}
+
+void consume_queue_items() {
+    while(true) {
+        int item_index;
+        if((item_index = count.fetch_sub(1, std::memory_order_acquire)) <= 0) {  // read-modify-write operation
+            wait_for_more_items();   // wait for more items
+            continue;
+        }
+        process(queue_data[item_index-1]);  // reading queue_data is safe
+    }
+}
+
+int main() {
+    std::thread a(populate_queue);
+    std::thread b(consume_queue_items);
+    std::thread c(consume_queue_items);
+
+    a.join();
+    b.join();
+    c.join();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [queue_read]: Leyendo valores de una cola con operaciones atómicas]
+
+Una forma de gestionar esto sería que el hilo productor almacenara los elementos en un búfer compartido y luego ejecutara `count.store(number_of_items, memory_order_release)` para indicar a los demás hilos que hay datos disponibles. Los hilos consumidores podrían entonces ejecutar `count.fetch_sub(1, memory_order_acquire)` para reclamar un elemento de la cola antes de leer el buffer compartido. Cuando el contador llega a cero, ya no quedan elementos y el hilo debe esperar.
+
+Si solo hay un hilo consumidor, esto funciona correctamente, `fetch_sub()` es una lectura con semántica `memory_order_acquire`, y la escritura tenía semántica `memory_order_release`, por lo que la escritura se sincroniza con la lectura y el hilo puede leer con seguridad el elemento del buffer. Si hay dos hilos consumidores, el segundo `fetch_sub()` verá el valor escrito por el primero, y no el valor escrito por la operación `store`. Sin la regla de la secuencia de liberación (*release sequence*), este segundo hilo no tendría una relación *happens-before* con el primero, y no sería seguro leer el buffer compartido, a menos que el primer `fetch_sub()` también tuviera semántica `memory_order_release`, lo que introduciría una sincronización innecesaria entre los dos hilos consumidores. Sin la regla de la secuencia de liberación (*release sequence*), o sin usar `memory_order_release` en los `fetch_sub()`, no habría nada que garantizara que las escrituras en `queue_data` fueran visibles para el segundo consumidor, y se produciría una condición de carrera. Afortunadamente, el primer `fetch_sub()` sí participa en la secuencia de liberación (*release sequence*), y por tanto el `store()` se sincroniza con el segundo `fetch_sub()`.
+
+Sigue sin existir ninguna relación *synchronizes-with* entre los dos hilos consumidores. Esto se ilustra en Figure [res/006_006]. Las líneas discontinuas de la figura representan la secuencia de liberación (*release sequence*), y las líneas continuas muestran las relaciones *happens-before*.
+
+![Figure [res/006_006]: Secuencia de liberación (*release sequence*) para la cola](res/006_006.png)
+
+Puede haber cualquier número de eslabones en la cadena, pero siempre que todos sean operaciones de *lectura-modificación-escritura* como `fetch_sub()`, `el store()` seguirá sincronizándose con cada una de ellas que esté etiquetada con `memory_order_acquire`. En este ejemplo, todos los eslabones son iguales y todos son operaciones *acquire*, pero podrían ser una mezcla de distintas operaciones con diferentes semánticas de orden de memoria.
+
+Aunque la mayoría de las relaciones de sincronización provienen de la semántica de orden aplicada a las operaciones sobre variables atómicas, también es posible introducir restricciones adicionales de orden utilizando barreras (*fences*).
+
+## Fences
+
+Una biblioteca de operaciones atómicas no estaría completa sin un conjunto de *fences*. Estas son operaciones que imponen restricciones de orden de memoria sin modificar ningún dato y, por lo general, se combinan con operaciones atómicas que utilizan las restricciones de orden `memory_order_relaxed`. Las *fences* son operaciones globales y afectan al orden de otras operaciones atómicas en el hilo que ejecuta la *fence*. También se conocen comúnmente como barreras de memoria (*memory barriers*), y reciben este nombre porque introducen una línea en el código que ciertas operaciones no pueden cruzar. Como se mencionó anteriormente, las operaciones *relaxed* sobre variables distintas pueden normalmente reordenarse libremente por el compilador o por el hardware. Las *fences* restringen esta libertad e introducen relaciones *happens-before* y *synchronizes-with* que antes no existían.
+
+Se añade una *fence* entre las dos operaciones atómicas de cada hilo en Listing [relaxed], como se muestra en el siguiente listado.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <atomic>
+#include <thread>
+#include <assert.h>
+
+std::atomic<bool> x,y;
+std::atomic<int> z;
+
+void write_x_then_y() {
+    x.store(true, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    y.store(true, std::memory_order_relaxed);
+}
+
+void read_y_then_x() {
+    while(!y.load(std::memory_order_relaxed));
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if(x.load(std::memory_order_relaxed))
+        ++z;
+}
+
+int main() {
+    x = false;
+    y = false;
+    z = 0;
+    std::thread a(write_x_then_y);
+    std::thread b(read_y_then_x);
+    a.join();
+    b.join();
+    assert(z.load()!=0);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [fence]: Las operaciones *relaxed* se pueden ordenar con *fences*]
+
+La *release fence* se sincroniza con la *acquire fence* porque la lectura de `y` obtiene el valor almacenado anteriormente. Esto significa que la escritura en `x` ocurre antes de la lectura de `x`, por lo que el valor leído debe ser `true` y el assert no saltará. Esto contrasta con el caso original sin *fences*, donde la escritura y la lectura de `x` no estaban ordenadas, y por lo tanto el assert sí podía activarse. Es importante notar que ambas *fences* son necesarias, se necesita una *release* en un hilo y una *acquire* en otro para establecer una relación *synchronizes-with*.
+
+En este caso, la *release fence* tiene el mismo efecto que si la escritura en `y` estuviera etiquetada con `memory_order_release` en lugar de `memory_order_relaxed`. Del mismo modo, la *acquire fence* hace que sea como si la lectura de `y` estuviera etiquetada con `memory_order_acquire`. Esta es la idea general con las *fences*, si una operación *acquire* ve el resultado de una escritura que ocurre después de una *release fence*, la *fence* se sincroniza con esa operación *acquire*, y si una lectura que ocurre antes de una *acquire fence* ve el resultado de una escritura *release*, entonces la operación *release* se sincroniza con la *acquire fence*. Se Pueden tener *fences* en ambos lados, como en este ejemplo, en ese caso, si una lectura que ocurre antes de la *acquire fence* ve un valor escrito por una escritura que ocurre después de la *release fence*, la *release fence* se sincroniza con la *acquire fence*.
+
+Aunque la sincronización de las *fences* depende de los valores leídos o escritos por operaciones antes o después de la *fence*, es importante notar que el punto de sincronización es la propia *fence*. Si se toma `write_x_then_y` de Listing [fence] y se mueve la escritura en `x` después de la *fence*, la condición del assert ya no está garantizada, aunque la escritura en `x` ocurra antes de la escritura en `y`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void write_x_then_y() {
+    std::atomic_thread_fence(std::memory_order_release);
+    x.store(true, std::memory_order_relaxed);
+    y.store(true, std::memory_order_relaxed);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [fence2]: Sincronización errónea de la *fence*]
+
+Estas dos operaciones ya no están separadas por la *fence* y, por tanto, ya no están ordenadas. Solo cuando la *fence* se coloca entre la escritura en `x` y la escritura en `y` se impone un orden. La presencia o ausencia de una *fence* no afecta a los ordenamientos *happens-before* que ya estén garantizados por otras operaciones atómicas.
+
+Este ejemplo, y casi todos los demás ejemplos vistos hasta ahora, se construyen completamente con variables de tipo atómico. Pero el verdadero beneficio de usar operaciones atómicas para imponer un orden es que pueden imponer un orden sobre operaciones no atómicas y evitar el comportamiento indefinido de una condición de carrera.
+
+## Ordenando operaciones no atómicas con atomics
+
+Si se reemplaza la `x` de Listing [fence] con un ordinario `bool` no atómico, se garantiza que el comportamiento sea el mismo.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <atomic>
+#include <thread>
+#include <assert.h>
+
+bool x = false;   // x is a plain non atomic boolean
+std::atomic<bool> y;
+std::atomic<int> z;
+
+void write_x_then_y() {
+    x = true;       // store to x before the fence
+    std::atomic_thread_fence(std::memory_order_release);
+    y.store(true, std::memory_order_relaxed);   // store to y after the fence
+}
+
+void read_y_then_x() {
+    while(!y.load(std::memory_order_relaxed));    // wait until the write to y is done
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (x)          // this will read the value written to x
+        ++z;
+}
+
+int main() {
+    x = false;
+    y = false;
+    z = 0;
+    std::thread a(write_x_then_y);
+    std::thread b(read_y_then_x);
+    a.join();
+    b.join();
+    assert(z.load()!=0);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [fence3]: Ordenando sobre operaciones no atómicas]
+
+Las *fences* siguen proporcionando un orden obligatorio entre la escritura en `x` y la escritura en `y`, así como entre la lectura de `y` y la lectura de `x`, y todavía existe una relación *happens-before* entre la escritura en `x` y la lectura de `x`, por lo que el assert sigue sin activarse. La escritura y la lectura de y aún deben ser atómicas, de lo contrario, habría una condición de carrera (*data race*) sobre `y`. Sin embargo, las *fences* imponen un orden sobre las operaciones sobre `x`, una vez que el hilo lector ha visto el valor almacenado de `y`. Este orden obligatorio asegura que no hay *data* race sobre `x`, aunque sea modificado por un hilo y leído por otro.
+
+No solo las *fences* pueden ordenar operaciones no atómicas. Ya se vieron los efectos de orden en Listing [consume] con un par `memory_order_release` / `memory_order_consume` que ordenaba accesos no atómicos a un objeto dinámicamente asignado. De hecho, muchos de los ejemplos de este capítulo podrían reescribirse reemplazando algunas operaciones `memory_order_relaxed` por operaciones no atómicas normales.
+
+## Ordenando operaciones no atómicas
+
+El ordenamiento de operaciones no atómicas mediante el uso de operaciones atómicas es donde la parte *sequenced-before* de *happens-before* se vuelve crucial. Si una operación no atómica está *sequenced-before* una operación atómica, y esa operación atómica *happens-before* de una operación en otro hilo, entonces la operación no atómica también *happens-before* que esa operación en el otro hilo. Aquí es de donde proviene el orden de las operaciones sobre `x` en Listing [fence3] y por qué funciona Listing [reader_writer]. Esta misma idea es la base de los servicios de sincronización de más alto nivel en la biblioteca standard de C++, como los *mutexes* y las *variables de condición*. Para ver cómo funciona, se recupera el *spinlock mutex* simple en Listing [atomic_flag_mutex].
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class spinlock_mutex {
+  std::atomic_flag flag;
+
+  public:
+    spinlock_mutex() :
+        flag(ATOMIC_FLAG_INIT) {}
+
+    void lock() {
+        while(flag.test_and_set(std::memory_order_acquire));
+    }
+
+    void unlock() {
+        flag.clear(std::memory_order_release);
+    }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atomic_flag_mutex2]: Implementación de un *mutex* *spinlock* usando `std::atomic_flag`]
+
+La operación `lock()` es un bucle sobre `flag.test_and_set()` usando la semántica `memory_order_acquire`. La operación `unlock()` es una llamada a `flag.clear()` con semántica `memory_order_release`. Cuando el primer hilo llama a `lock()`, el *flag* está inicialmente en `clear`, por lo que la primera llamada a `test_and_set()` pondrá el *flag* a `true` y retornará `false`, indicando que este hilo ahora posee el *lock*, terminando el bucle. El hilo puede entonces modificar cualquier dato protegido por el *mutex*. Cualquier otro hilo que llame a `lock()` en ese momento encontrará el *flag* ya a `true` y quedará bloqueado en el bucle de `test_and_set()`.
+
+Cuando el hilo con el *lock* termina de modificar los datos protegidos, llama a `unlock()`, que ejecuta `flag.clear()` con semántica `memory_order_release`. Esto se sincroniza con la siguiente llamada a `flag.test_and_set()` desde la invocación de `lock()` en otro hilo, porque esta llamada tiene semántica `memory_order_acquire`. Dado que la modificación de los datos protegidos necesariamente está *sequenced-before* la llamada a `unlock()`, dicha modificación ocurre antes del `unlock()` y, por extensión, antes de la llamada subsecuente a `lock()` en el segundo hilo (debido a la relación *synchronizes-with* entre `unlock()` y `lock()`) y antes de cualquier acceso a esos datos por el segundo hilo una vez que ha adquirido el *lock*.
+
+Aunque otras implementaciones de *mutex* tengan operaciones internas diferentes, el principio básico es el mismo, `lock()` es una operación *acquire* sobre una ubicación de memoria interna. `unlock()` es una operación *release* sobre esa misma ubicación de memoria.
+
+Cada uno de los mecanismos de sincronización descritos en los capítulos anteriores proporciona garantías de ordenamiento en términos de la relación *synchronizes-with*. Esto permite utilizarlos para sincronizar los datos y garantizar un orden consistente de las operaciones.
+
+A continuación se muestran las relaciones de sincronización proporcionadas por estos servicios:
+
+- `std::thread`
+
+  - La finalización del constructor de `std::thread` se sincroniza con la invocación de la función o el objeto *callable* proporcionado en el nuevo hilo
+  - La finalización de un hilo se sincroniza con el retorno de una llamada exitosa a `join` sobre el objeto `std::thread` que posee ese hilo
+
+- `std::mutex`, `std::timed_mutex`, `std::recursive_mutex`, `std::recursive_timed_mutex`
+
+  - Todas las llamadas a `lock` y `unlock`, así como las llamadas exitosas a `try_lock`, `try_lock_for` o `try_lock_until` sobre un mismo objeto `mutex`, forman un orden total único, el orden de bloqueo del `mutex`
+  - Una llamada a `unlock` en un objeto `mutex` se sincroniza con una llamada posterior a `lock`, o con una llamada posterior exitosa a `try_lock`, `try_lock_for` o `try_lock_until`, según el orden de bloqueo del `mutex`
+  - Las llamadas fallidas a `try_lock`, `try_lock_for` o `try_lock_until` no participan en ninguna relación de sincronización
+
+- `std::shared_mutex`, `std::shared_timed_mutex`
+
+  - Todas las llamadas a `lock`, `unlock`, `lock_shared` y `unlock_shared`, así como las llamadas exitosas a `try_lock`, `try_lock_for`, `try_lock_until`, `try_lock_shared`, `try_lock_shared_for` o `try_lock_shared_until` sobre un mismo objeto `mutex`, forman un orden total único, el orden de bloqueo del `mutex`
+  - Una llamada a `unlock` en un objeto `mutex` se sincroniza con una llamada posterior a `lock` o `shared_lock`, o con una llamada posterior exitosa a `try_lock`, `try_lock_for`, `try_lock_until`, `try_lock_shared`, `try_lock_shared_for` o `try_lock_shared_until`, según el orden de bloqueo del `mutex`
+  - Las llamadas fallidas a `try_lock`, `try_lock_for`, `try_lock_until`, `try_lock_shared`, `try_lock_shared_for` o `try_lock_shared_until` no participan en ninguna relación de sincronización
+
+- `std::promise`, `std::future` y `std::shared_future`
+
+  - La finalización exitosa de una llamada a `set_value` o `set_exception` en un objeto `std::promise` se sincroniza con el retorno exitoso de una llamada a `wait` o `get`, o con una llamada a `wait_for` o `wait_until` que devuelva `std::future_status::ready` en un `future` que comparte el mismo estado asíncrono que la `promise`
+  - El destructor de un objeto `std::promise` que almacena una excepción `std::future_error` en el estado asíncrono compartido asociado a la `promise` se sincroniza con el retorno exitoso de una llamada a `wait` o `get`, o a `wait_for` o `wait_until` que devuelva `std::future_status::ready` en un `future` que comparte el mismo estado asíncrono
+
+- `std::packaged_task`, `std::future` y `std::shared_future`
+
+  - La finalización exitosa de una llamada al operador función (`operator()`) de un objeto `std::packaged_task` se sincroniza con el retorno exitoso de una llamada a `wait` o `get`, o a `wait_for` o `wait_until` que devuelva `std::future_status::ready` en un `future` que comparte el mismo estado asíncrono que la `packaged task`
+  - El destructor de un objeto `std::packaged_task` que almacena una excepción `std::future_error` en el estado asíncrono compartido asociado a la `packaged task` se sincroniza con el retorno exitoso de una llamada a `wait` o `get`, o a `wait_for` o `wait_until` que devuelva `std::future_status::ready` en un `future` que comparte el mismo estado asíncrono
+
+- `std::async`, `std::future` y `std::shared_future`
+
+  - La finalización del hilo que ejecuta una tarea lanzada mediante `std::async` con política `std::launch::async` se sincroniza con el retorno exitoso de una llamada a `wait` o `get`, o a `wait_for` o `wait_until` que devuelva `std::future_status::ready` en un `future que` comparte el mismo estado asíncrono que la tarea lanzada
+  - La finalización de una tarea lanzada mediante `std::async` con política `std::launch::deferred` se sincroniza con el retorno exitoso de una llamada a `wait` o `get`, o a `wait_for` o `wait_until` que devuelva `std::future_status::ready` en un `future` que comparte el mismo estado asíncrono que la `promise`
+
+- `std::condition_variable` y `std::condition_variable_any`
+
+  - Las variables de condición no proporcionan ninguna relación de sincronización por sí mismas
+  - Son optimizaciones sobre bucles de espera activa (`busy-wait loops`), y toda la sincronización se logra mediante las operaciones sobre el `mutex` asociado
+
+<link rel="stylesheet" href="res/md/viu.css">
+<style class="fallback">body{visibility:hidden}</style><script>markdeepOptions={tocStyle:'long'};</script>
+<!-- Markdeep: --><script src="res/md/markdeep.min.js?" charset="utf-8"></script>

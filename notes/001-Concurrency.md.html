@@ -1,0 +1,216 @@
+<meta charset="utf-8">
+**22GIAR - 001 - Programación Concurrente**
+    <small>©2026 VIU - 22GIAR Programación Concurrente, Distribuida y Paralela - Iván Fuertes</small>
+
+# Introducción
+
+Concurrencia es la acción de dos o más actividades sucediendo al mismo tiempo. Se puede encontrar de manera natural, como seres humanos podemos andar y hablar al mismo tiempo, o hacer diferentes acciones a la vez con cada mano, y cada uno de nosotros vive de manera independiente, una persona puede estar viendo la TV, mientras otra está dando un paseo.
+
+Un código secuencial es aquel en el cual sus instrucciones se van ejecutando en serie, una detrás de otra, desde el inicio hasta el final. En este escenario, solo existe una única actividad o hilo de ejecución. Esta es la forma tradicional de programar, los ordenadores solo tenían un procesador, e incluso los primeros sistemas operativos no daban soporte para multiples hilos dentro del mismo proceso.
+
+Cuando se habla de concurrencia en relación a la informática, se habla de un solo sistema realizando múltiples actividades independientes en paralelo, no de manera secuencial (una tras otra). Se desarrollarán multiples actividades que progresarán de manera simultánea. Cada una de esas actividades sigue siendo secuencial, pero ahora el programa no avanzará siguiendo una única secuencia, puesto que cada hilo podrá seguir una serie de instrucciones distinta, y todos avanzan de manera simultánea.
+
+Esto no es nada nuevo, sistemas operativos multitarea que permitían a un solo ordenador de escritorio ejecutar multiples aplicaciones al mismo tiempo han sido comunes desde hace mucho tiempo. Igual que servidores de alto rendimiento con muchos procesadores que permitían una concurrencia auténtica. Lo que ha cambiado es la prevalencia de ordenadores que pueden ejecutar multiples tareas de manera realmente concurrente en paralelo, en contraposición a otros que simplemente simulan la ilusión de hacerlo.
+
+Históricamente, la mayoría de ordenadores tenían un solo procesador, con una sola unidad de procesamiento o núcleo, y esto sigue manteniéndose así en ciertos contextos. Una máquina de ese tipo solo puede realizar una tarea a la vez, pero puede cambiar de tarea muchas veces por segundo. Haciendo un poco de cada tarea y cambiando a otra, se simulaba que las tareas se ejecutaban de manera concurrente. Eso se llama *task switching*, y se considera concurrencia, puesto que los cambios de tarea son tan rápidos que es difícil detectar en que punto una tarea ha sido suspendida por el procesador y ha cambiado a otra tarea. Este sistema da la ilusión de concurrencia tanto al usuario como a la aplicación, pero puesto que es solo una ilusión, el comportamiento de las aplicaciones puede ser ligeramente distinto cuando se ejecutan en un solo procesador a cuando lo hacen en un entorno de concurrencia real. En particular, ciertas asunciones incorrectas sobre el modelo de memoria pueden no mostrarse en ese contexto.
+
+Los ordenadores con procesadores con múltiples núcleos son ahora comunes, en máquinas de escritorio como en dispositivos móviles. Tanto si tienen múltiples procesadores, como múltiples núcleos dentro de un procesador, o ambos, estos ordenadores son capaces de ejecutar realmente más de una tarea en paralelo. Esto se llama concurrencia por hardware.
+
+![Figure [res/001_001]: Dos escenarios, ejecución paralela en dos núcleos, contra *task switching* en un solo nucleo](res/001_001.png)
+
+En un escenario ideal con dos tareas a procesar, como el de Figure [res/001_001], con dos tareas a realizar, cada una dividida en 10 trozos de igual longitud. En una maquina con dos núcleos cada tarea se puede ejecutar en su propio núcleo. En una maquina con un solo núcleo haciendo *task switching*, los trozos de ejecución de cada tarea están intercalados, pero también están un poco espaciados entre sí (la barras grises que separan los trozos de colores que son más gruesos). Para realizar la intercalación, el sistema tiene que realizar un cambio de contexto cada vez que cambia de una tarea a otra, y esto consume tiempo. Este cambio de contexto supone que el sistema operativo debe guardar el estado de la CPU y el puntero de instrucción para la tarea que se está ejecutando, averiguar a qué tarea se debe cambiar, y recargar el estado de la CPU para la nueva tarea, la CPU entonces debe cargar la memoria para las instrucciones y los datos para la nueva tarea en la cache, lo que causa un retraso aún mayor.
+
+Aunque la disponibilidad de concurrencia en el hardware es obvia con sistemas con varios procesadores o núcleos, algunos procesadores pueden ejecutar multiples hilos de ejecución en un solo núcleo. El factor más importante a considerar es el número real de hilos de hardware, la medida de cuantas tareas independientes el hardware puede realmente ejecutar de manera concurrente. Incluso en un sistema con concurrencia real, es muy habitual tener más tareas en ejecución de las que el hardware puede ejecutar en paralelo, así que el *task switching* es usado incluso en estos casos. En un simple ordenador de escritorio suelen coexistir cientos de tareas en ejecución simultanea, realizando operaciones en background, incluso mientras el ordenador está aparentemente sin usar. El sistema de *task switching* el que permite que estas operaciones en background se ejecuten mientras que el usuario puede estar usando cualquier aplicación en primer plano, como un navegador, procesador de textos, videojuego,...
+
+![Figure [res/001_002]: *Task Switching* en dos nucleos](res/001_002.png)
+
+En la figura 2 se puede ver el uso de *task switching* para cuatro tareas en dos núcleos, en un escenario simulado donde cada tarea está dividida en trozos de igual tamaño. Se ejecutan cada uno de los trozos de ejecución en cualquiera de los dos núcleos en cualquier orden. Incluso en la realidad es todo más caótico puesto que los trozos de ejecución suelen ser de tamaños distintos haciendo la planificación mucho más irregular.
+
+Para soportar esta concurrencia, habrá que ejecutar este conjunto de tareas de manera simultánea o paralela. Para ello existen dos mecanismos:
+
+- Paralelismo real, cuando hayan disponibles varios procesadores físicos, de tal manera que cada tarea se ubicará en un procesador diferente. En las arquitecturas modernas, los procesadores pueden tener múltiples núcleos. En este caso, basta con asignar un núcleo diferente a cada tarea. Todas avanzarán de manera simultanea sin problema. Si solo se tiene un ordenador con un solo procesador y un único núcleo, aún se puede trabajar de manera concurrente real usando más de un ordenador. En este caso, la aplicación concurrente estará formada por múltiples procesos que se ejecutan en distintos ordenadores y cooperarán entre sí intercambiando mensajes para comunicarse.
+
+- Paralelismo lógico, los procesadores actuales son rápidos, y muchas veces la velocidad de ejecución de los programas se ve afectada por el acceso a operaciones de entrada/salida (E/S). Un acceso a memoria RAM, dispositivos de almacenamiento secundario, redes,... son ordenes de magnitud más lentas que la velocidad de ejecución de cualquier procesador. Con lo cual, las operaciones de E/S suspenden temporalmente el avance del hilo de ejecución que las haya solicitado. En ese punto, se puede intercalar la ejecución de multiples tareas y ofrecer la ilusión de que éstas avanzan simultáneamente. Mientras se sirve una operación E/S, el procesador queda libre, y en lugar de malgastar ese tiempo haciendo nada, se puede elegir otra tarea que estuviera preparada y esperando para ejecutar durante ese intervalo. Este es el principio seguido para proporcionar multitarea, multiplexación que permite la ejecución simultanea de múltiples procesos en un único procesador, de manera que parece que todos los procesos se están ejecutando a la vez, aunque tan solo haya un único proceso en el procesador en cada instante de tiempo. De manera práctica, un usuario será incapaz de distinguir entre un sistema con un solo procesador y un solo núcleo, de otro con multiples procesadores/núcleos, el sistema operativo se encarga de ocultar estos detalles. El usuario percibe que multiples actividades avanzan de manera simultánea.
+
+Ambos tipos de paralelismo se pueden combinar fácilmente. Si en un ordenador se tiene un procesador de dos núcleos, el número de tareas que se pueden ejecutar de manera concurrente no tiene por que limitarse a dos. Al combinar el paralelismo real con el lógico, se pueden usar tantos hilos como sea necesario.
+
+## Tipos de concurrencia
+
+Existen dos aproximaciones para trabajar de manera concurrente, tener varios procesos de un solo hilo, o tener un solo proceso con múltiples hilos. Se pueden combinar de cualquier manera y tener varios procesos, algunos de los cuales pueden tener múltiples hilos, los principios son los mismos.
+
+### Concurrencia con múltiples procesos
+
+La primera forma de usar concurrencia en una aplicación es dividir la aplicación en múltiples, separados, procesos mono-hilados que se ejecutan a la vez. Estos procesos separados se pueden pasar mensajes entre ellos a través de los canales habituales (señales, *sockets*, ficheros, pipes,...). El problema es que esta comunicación suele ser complicada o lenta, o ambas, puesto que los sistemas operativos suelen ofrecer sistemas de protección entre procesos muy fuertes, para evitar que un proceso pueda de manera accidental datos que pertenecen a otro proceso. Otro problema es que existe un sobrecoste inherente en ejecutar multiples procesos, lleva tiempo arrancar un proceso, el sistema operativo debe dedicar recursos internos para gestionar el proceso,...
+
+Un punto a favor es la protección que los sistemas operativos suelen aplicar a los procesos y la comunicación a través de mecanismos de alto nivel hacer que sea más sencillo escribir código seguro concurrente. Otra ventaja añadida es que se pueden ejecutar procesos separados en distintos equipos conectados a través de una red, creando de esta manera un sistema distribuido. Pese a que esto incrementa el coste de la comunicación entre procesos, que ahora están ejecutándose de manera simultanea en diferentes máquinas, un sistema bien diseñado puede ser una manera de incrementar el paralelismo y mejorar el rendimiento con poca inversión de dinero.
+
+![Figure [res/001_003]: Comunicación entre dos procesos concurrentes](res/001_003.png)
+
+### Concurrencia con múltiples hilos
+
+La otra forma de concurrencia es ejecutar múltiples hilos dentro de un solo proceso. Los hilos son como procesos muy ligeros, cada hilo se ejecuta de manera independiente de los otros, y cada hilo puede ejecutar una secuencia diferencia de instrucciones. Pero todos los hilos dentro de un proceso comparten el mismo espacio de direcciones, y la mayoría de los datos se pueden acceder directamente desde todos los hilos. Las variables globales siguen siendo globales, y punteros o referencias a objetos se pueden pasar fácilmente entre hilos. Aunque suele ser posible en sistemas operativos modernos compartir memoria entre procesos, es complejo de organizar y gestionar, porque las direcciones de memoria de los mismos datos no son necesariamente las mismas en distintos procesos.
+
+![Figure [res/001_004]: Comunicación entre dos hilos en un proceso](res/001_004.png)
+
+El espacio de direcciones compartido y la falta de protección de los datos entre hilos hace que el sobrecoste asociado al uso de múltiples hilos sea mucho menor que usando múltiples procesos, puesto que el sistema operativo tiene mucho menos trabajo. Pero la flexibilidad de la memoria compartida viene con un precio, si se accede a los datos desde múltiples hilos el programador de la aplicación debe asegurar que los datos que ve cada hilo son consistentes cada vez que se acceden. Los problemas alrededor de los datos compartidos entre hilos no son insalvables, pero hay que tener un cuidado especial al escribir código.
+
+El bajo sobrecoste de lanzar y comunicar múltiples hilos en un solo proceso comparado con lanzar y comunicar varios procesos mono-hilados significa que es la opción preferida a la concurrencia en la mayoría de los lenguajes, incluido C++, a pesar de los potenciales problemas derivados de la memoria compartida. Además, en lenguajes como C++, el standard no ofrece ningún soporte intrínseco para la comunicación entre procesos, por lo que programas que quieran usar este sistema, tienen que recurrir a APIs específicas de cada plataforma para ello.
+
+### Concurrencia vs Paralelismo
+
+Concurrencia y paralelismo tienen un significado que se solapa entre ellos, al menos respecto al código multihilo.  De hecho, es habitual usarlos de manera intercambiable. La diferencia es principalmente una cuestión de matices e intención. Ambos términos hacen referencia a la ejecución de multiples tareas de manera simultánea, usando el hardware disponible, pero el paralelismo está mucho más orientado hacia el rendimiento. Se suele hablar de paralelismo cuando el interés principal es aprovechar el hardware disponible para aumentar el rendimiento del procesamiento masivo de datos, mientras que la concurrencia se aplica cuando el interés principal es la separación de responsabilidades o aplicaciones que no se bloqueen.
+
+## Ventajas
+
+- Eficiencia. De manera general, realizar múltiples tareas dentro de la misma aplicación permite que ésta pueda acabar su trabajo más rápidamente. El hecho de que alguna tarea se suspenda al usar o solicitar algún recurso (por ejemplo E/S) no suspende toda la aplicación, y con ello, esta podría seguir avanzando. En un aplicación concurrente es fácil que se usen múltiples recursos simultáneamente (ficheros, memoria, procesador, red,...)
+
+- Escalabilidad. Si una aplicación se puede diseñar e implantar como un conjunto de componentes que interactúen y colaboren entre sí, generando al menos una tarea por cada componente, se facilitará la distribución de la aplicación sobre diferentes ordenadores. Solo habría que instalar cada componente en un ordenador distinto, generando una aplicación distribuida. Así, la cantidad de recursos de procesamiento simultáneo se incrementará. Un sistema es escalable cuando es capaz de gestionar correctamente cargas crecientes de trabajo o tiene la capacidad de crecer y adaptarse a dichas cargas. En el caso de las aplicaciones concurrentes ambas interpretaciones se pueden cumplir combinando la distribución y replicación de componentes.
+
+- Gestión de las comunicaciones. El uso eficiente de los recursos permite que aquellos recursos relacionados con la comunicación entre tareas sean explotados de manera sencilla. Si la comunicación está basada en el intercambio de mensajes a través de la red, esta comunicación no implicará que toda la aplicación se detenga esperando alguna respuesta. El uso de mecanismo síncronos de comunicación entre tareas se puede integrar de manera fácil en un aplicación concurrente.
+
+- Flexibilidad. Las aplicaciones concurrentes suelen usar un diseño modular y estructurado, con especial atención a lo que debe hacer cada tarea, qué recursos necesitará y qué módulos del programa ejecutará. Si los requisitos cambiasen, sería sencillo identificar los módulos que necesitan ser adaptados para incorporar esas variaciones en la especificación y a que tareas implican. Por tanto, el invertir tiempo en un diseño estructurado y cuidadoso, permite crear aplicaciones más flexibles y adaptables.
+
+## Desventajas
+
+- Programación delicada. Al desarrollar aplicaciones concurrentes suelen surgir algunos problemas. El más importante suele ser el conocido como *condiciones de carrera*, y puede generar inconsistencias imprevistas en el valor de las variables o datos compartidos entre tareas cuando éstas los modifiquen. Otro problema son interbloqueos. Por esto, es importante conocer los problemas potenciales que entraña la programación concurrente y hay que tomar las precauciones oportunas para evitarlos.
+
+- Depuración compleja. Al estar compuesta de multiples tareas, una aplicación concurrente puede intercalar de maneras diferentes en cada ejecución las sentencias que ejecutan cada tarea. Normalmente, el programador no tiene acceso a decidir en tiempo de ejecución cuando una tarea entra en ejecución o se suspende en un entorno concurrente. Suele ser el sistema operativo, a través de su `scheduler` y sus propios algoritmos el que distribuye la carga de trabajo entre los múltiples procesadores/núcleos de hardware que tiene disponibles, en función de multitud de parámetros que quedan fuera del alcance del programador. Por ello, aunque se proporcionen las mismas entradas a la aplicación, los resultados que ésta genere pueden llegar a ser distintos en diferentes ejecuciones. Si alguno de estos resultados fuese incorrecto, sería difícil la reproducción de esta ejecución. Además, para depurar cualquier programa se suelen usar herramientas especializadas `debuggers`, y la gestión de estos puede incluso modificar el comportamiento de la aplicación concurrente, evitando que se diera la traza que provoco el error. Las aplicaciones concurrentes no tienen una depuración sencilla, y los mecanismos empleados en estos depuradores no siempre serán idénticos a los usados sobre aplicaciones secuenciales.
+
+## ¿Por qué usar concurrencia?
+
+Hay dos razones principales para usar concurrencia en una aplicación, separación de intereses y rendimiento. De hecho, deberían ser las únicas razones para usar concurrencia.
+
+### Separación de intereses
+
+Esta es siempre una buena idea al desarrollar software, agrupar trozos de código relacionados y mantener alejados los trozos que no tienen relación. Se hacen los programas más fáciles de entender y probar, y menos propensos a bugs. Se puede usar la concurrencia para separar distintas áreas de funcionalidad, incluso cuando las operaciones en esas distintas áreas necesitan suceder a la vez.
+
+Una aplicación de procesamiento intensivo con una interface de usuario tiene fundamentalmente dos grupos de responsabilidades, por un lado, procesar datos y por otro recoger el input del usuario. Si se hiciera en un solo hilo, entonces la aplicación tendría que estar verificando el estado de la interface de usuario continuamente a intervalos dejando de procesar sus datos, incluso el usuario podría hacer uso de algún botón y la aplicación tardaría un tiempo en llegar al código de interface para responder a él. En cambio, usando concurrencia para separar las dos partes, el código de procesamiento y el de la interface no tiene por qué estar mezclado, un hilo se puede dedicar al procesamiento de los datos, y el otro a atender a la interfaz de usuario, mejorando la respuesta a los comandos del usuario que se atienden inmediatamente.
+
+De manera similar, hilos separados se suelen usar para ejecutar tareas que deben correr de manera continua en background, como monitorizar el sistema de ficheros en una aplicación de búsqueda. De esta manera la lógica de cada hilo se hace mucho más simple, puesto que las interacciones entre ellos se limitan a puntos fácilmente identificables, en lugar de tener la lógica dispersa.
+
+En este caso, el número de hilos es independiente del número de núcleos disponibles, puesto que la división en hilos está basada en un diseño conceptual, en lugar de buscar mejorar el rendimiento.
+
+### Rendimiento, tareas y paralelismo de datos
+
+Los sistemas multiprocesador han existido desde hace mucho tiempo, pero hasta hace poco solo se podían encontrar en superordenadores, mainframes o grandes servidores. Pero los fabricantes de hardware han ido mejorando el rendimiento de sus procesadores a través de diseños con varios núcleos, con 2,4,8 o 16 núcleos por procesador, en lugar de un solo núcleo con mejor rendimiento individual. De esta manera, es sencillo encontrar en entornos domésticos cada vez más ordenadores o dispositivos móviles multinúcleo, incluso dispositivos embebidos. El aumento de potencia de estos equipos no viene de ejecutar una sola tarea más rápido, sino de ser capaces de ejecutar varias tareas en paralelo. En el pasado, los programadores eran sujetos pasivos en esta lucha por el rendimiento, los programas eran cada vez más rápidos en cada generación de procesadores sin ningún esfuerzo por parte de estos programadores. Pero ahora si el software quiere aprovechar este incremento en la potencia de procesamiento, debe ser diseñado para ejecutarse con múltiples tareas concurrentes. Lo cual supone un trabajo explicito de los programadores.
+
+Hay dos maneras de usar la concurrencia para el rendimiento, la primera y más obvia es dividir una tarea en varias partes y ejecutarlas en paralelo, reduciendo así el tiempo total de ejecución. A esto se le llama **paralelismo de tareas**. Aunque parezca sencillo, puede ser un proceso complejo, puesto que suelen haber muchas dependencias entre las distintas partes. Las divisiones pueden ser en términos de procesamiento (un hilo ejecuta una parte del algoritmo mientras otro hilo ejecuta otra parte), o en términos de datos (cada hilo ejecuta la misma operación en distintas partes de los datos), esto último se llama **paralelismo de datos**.
+
+Algunos algoritmos están ya diseñados de manera que este paralelismo es natural. Estos ya tienen buenas características para ser escalables, cuando el número de hilos de hardware disponibles aumenta, el paralelismo del algoritmo se puede incrementar para igualarlo.
+
+La segunda manera es usar el paralelismo disponible para solucionar problemas más grandes, en lugar de procesar un fichero a la vez, procesar 2 o 10,... Esta es en realidad una aplicación del paralelismo de datos, ejecutando la misma operación en distintos conjuntos de datos concurrentemente, pero hay un objetivo diferente. Sigue costando el mismo tiempo procesar un bloque de datos, pero ahora más datos pueden ser procesados en el mismo periodo de tiempo. Hay ciertos límites, y esto no será beneficioso en todos los casos, pero el incremento en potencia que resulta de esto puede hacer nuevas cosas posibles.
+
+## Cuando No Usar Concurrencia
+
+Tan importante como saber cuándo usar concurrencia, es saber cuándo no usarla. Fundamentalmente, la única razón para no usarla es cuando el beneficio no compensa el coste. El código que usa concurrencia es más difícil de entender, hay un coste intelectual en escribir y mantener código multihilo, y la complejidad adicional puede llevar a más bugs. A menos que la ganancia potencial de rendimiento sea lo suficientemente grande, o la separación de intereses lo suficientemente clara, y esto pueda justificar el tiempo de desarrollo adicional para hacerlo bien y los costes adicionales para mantener código multihilo, no se debe usar concurrencia.
+
+Además, la ganancia de rendimiento puede no ser tan grande como se esperaba, hay un sobrecoste inherente asociado a lanzar un hilo. El sistema operativo tiene que reservar recursos del kernel, espacio de pila y entonces añadir un nuevo hilo al *scheduler*, todo eso lleva tiempo. Si la tarea que se va a ejecutar en el hilo es rápida, el tiempo invertido por la tarea va a ser minimizado por el sobrecoste de lanzar el hilo, haciendo que el rendimiento global de la aplicación sea incluso peor que si la tarea se hubiera ejecutado directamente desde el hilo principal.
+
+Además, los hilos son un recurso limitado. Si se tienen demasiados hilos ejecutándose a la vez, estos consumen recursos del sistema operativo y pueden hacer que el sistema funcione más lento. Incluso pueden comerse la memoria disponible o el espacio de direcciones para un proceso, puesto que cada hilo requiere un espacio de pila separado. En un sistema cliente/servidor, si el servidor lanza un hilo separado para cada conexión, puede funcionar para pocas conexiones, pero puede consumir todos los recursos si se usa en un servidor de alta demanda.
+
+Por último, cuantos más hilos haya en ejecución, más cambios de contexto tiene que realizar el sistema operativo. Y cada uno de esos cambios de contexto consume un tiempo que podría estar usándose para realizar trabajo significativo, así pues, a partir de un momento determinado añadir un hilo extra podría reducir el rendimiento global de la aplicación en lugar de incrementarlo. Por eso, para alcanzar el mejor rendimiento del sistema, es necesario ajustar el número de hilos ejecutándose y tener en cuenta el nivel de concurrencia del hardware.
+
+El uso de la concurrencia para mejorar el rendimiento es como cualquier otra estrategia de optimización, tiene un potencial de mejora, pero puede complicar el código y hacerlo propenso a bugs. Por ello, suele valer la pena hacerlo solo para las partes de rendimiento crítico donde hay un potencial real de ganancia de rendimiento. Pero, si esa ganancia de rendimiento fuera menor que el peso de la claridad del diseño o la separación de intereses, entonces aún valdría la pena aplicarla.
+
+## Ejemplos
+
+Existen una serie de problemas clásicos o académicos de la programación concurrente que pueden ilustrar una serie de situaciones en las que multiples tareas deben seguir ciertas reglas para gestionar un recurso compartido de manera adecuada.
+
+### Productor-Consumidor
+
+Se tienen dos tipos de tareas, las productoras y las consumidoras. Unas producen cosas, y otras las consumen. La interacción entre ambos roles se lleva a cabo usando un buffer de capacidad limitada. En este buffer, los productores irán depositando elementos y los consumidores los extraerán. En este buffer se sigue la estrategia *FIFO (First In, First Out)* para gestionar los elementos, es decir, se extraerán en el orden en que fueron insertados.
+
+![Figure [res/001_005]: Productor-Consumidor con buffer](res/001_005.png)
+
+Se tiene un buffer con capacidad para 7 elementos, en este caso se construye como un vector cuyas componentes se identifican con los números naturales entre 0 y 6. Se podrían usar los siguientes atributos:
+
+- *in*, índice del vector en el cual un proceso productor insertaría el próximo elemento en el buffer, *in = 5*
+- *out*, índice del vector del cual un proceso consumidor va a extraer el próximo elemento del buffer, *out = 0*
+- *size*, tamaño del buffer, *size = 7*
+- *n_elems*, número actual de elementos en el vector, *n_elems = 5*
+- *buffer*, el vector con los elementos
+
+Cuando un productor genera un nuevo elemento va a tener que insertarlo en ese buffer para ponerlo a disposición de los consumidores. Para ello tiene que hacer una secuencia de comandos como esta:
+
+1. Insertar el nuevo elemento en la posición *in* del vector *buffer*, *buffer.insert(in, element)*
+2. Incrementar el valor de *in* de manera circular, *in = (in + 1) % size*
+3. Incrementar el número de elementos válidos en el vector, *n_elems++*
+
+Por otra parte, cuando un consumidor quiere extraer un elemento del buffer, tiene que realizar algo como esto:
+
+1. Obtener el elemento ubicado en la posición *in* del vector *buffer*, *element = buffer[in]*
+2. Incrementar el valor de *out* de manera circular, *out = (out + 1) % size*
+3. Decrementar el número de elementos válidos en el vector, *n_elems--*
+
+En un contexto de programación secuencial estos pasos parecen obvios y seguros, pero en un contexto de concurrencia estos dos algoritmos podrían fácilmente producir varios problemas.
+
+- Partiendo de la situación de Figure [res/001_005], si dos hilos que se ejecutan en paralelo iniciaran a la vez la inserción de un nuevo elemento en el vector, ambos observarían en el primer paso de su algoritmo el mismo valor para el atributo *in*. Con lo cual, ambos insertarían sus elementos en la posición 5, así el segundo elemento insertado sobrescribe al primero. Posteriormente, ambos incrementan al valor de *in*, primero pasa a valer 6, luego 0, así como el valor de *n_elems*, que llegaría a 7. Sin embargo, no habría ningún elemento en el índice 6 del vector.
+
+- De manera similar, si en esa misma situación inicial dos procesos consumidores tratan de extraer de manera simultánea un elemento del vector, probablemente ambos obtendrían el elemento contenido en el índice 0 del vector. Luego, se incrementaría el valor de *out* hasta llegar a 2, y se decrementa el valor de *n_elems* dos veces que pasaría a valer 3. Cada uno de ellos estaría convencido de haber obtenido un elemento distinto, pero en lugar de ello, cada uno estaría procesando por su cuenta el mismo elemento. Por contra, el elemento que estaba en la posición 1 jamás llegaría a ser usado por ningún consumidor y sería sobrescrito posteriormente por algún elemento insertado por un productor.
+
+- Desde la situación inicial, si tres procesos productores llegasen a insertar elementos sin que ningún consumidor extrajera ninguno mientras tanto, la capacidad del vector se desbordaría. Con lo que, la tercera inserción sobrescribiría el elemento que estuviera en el índice 0 del vector.
+
+- Y de manera similar, si seis procesos consumidores extrajeran elementos del vector, sin que ningún productor insertase algún nuevo elemento, el último de ellos se encontraría con un buffer vacío. Pero no sería consciente de ello y retornaría el contenido de la posición 5 del vector, que probablemente fuera un elemento viejo ya procesado.
+
+Para evitar estas situaciones incorrectas, debería respetarse las siguientes restricciones:
+
+- Para evitar las dos primeras situaciones se debería impedir que los métodos de acceso al vector fuesen ejecutados por más de un hilo simultáneamente. Es decir, cuando alguna tarea haya iniciado la ejecución de algún método de trabajo con el vector, ninguna otra tarea más podrá ejecutar algunos de los métodos de acceso al vector hasta que la primera haya acabado.
+
+- Para evitar que el vector se desbordara se debería impedir que los productores ejecutasen el método de inserción cuando el valor de los atributos *size* y *n_elems* fueran iguales.
+
+- Para evitar la extracción de elementos de un vector vacío se debería impedir que los consumidores ejecutasen el método de extracción cuando el atributo *n_elems* ya valiese 0.
+
+### Lector-Escritor
+
+Existe un recurso compartido por todas las tareas, y el estado de este recurso se puede modificar. Algunas tareas usarán métodos para modificar el estado del recurso, serán `escritores`, otras tareas solo leerán el estado del recurso, no lo modificarán, serán `lectores`. Por ejemplo, un fichero, que puede ser leído  o escrito por diferentes procesos.
+
+Para garantizar que el recurso sea usado correctamente hay que respetar las siguientes restricciones:
+
+- Multiples tareas lectoras pueden acceder simultáneamente al recurso.
+
+- Solo un proceso escritor puede estar accediendo al recurso. En caso de que un escritor acceda, ningún proceso más podrá usar el recurso.
+
+Así se garantiza la consistencia en las modificaciones realizadas sobre el recurso. Mientras un proceso escriba sobre él, ninguna escritura más llegará a causar interferencias. También se evita que algún proceso lector pudiera leer un estado intermedio incorrecto durante la escritura.
+
+### Cinco filósofos
+
+En el problema de los cinco filósofos se asume que existen cinco filósofos cuya única misión es pensar y comer. En la mesa que comparten hay cinco plazas. A estos filósofos les gusta la pasta, y para comer necesitan dos tenedores cada uno.
+
+![Figure [res/001_006]: La mesa de los 5 filósofos](res/001_006.png)
+
+Sin embargo, en la mesa hay 5 platos y 5 tenedores. Por lo tanto, cuando un filósofo va a comer tendrá que coger los dos tenedores que queden a ambos lados de su plato, pero para ello, ninguno de sus dos filósofos vecinos podrá estar comiendo.
+
+Hay escasez de recursos en el sistema, no hay suficientes tenedores para que todos los filósofos coman a la vez. De hecho, en el mejor de los casos solo habrá dos filósofos comiendo a la vez.
+
+El algoritmo que seguirá cada filósofo para comer será:
+
+1. Coger el tenedor derecho
+2. Coger el tenedor izquierdo
+3. Comer
+4. Dejar ambos tenedores
+5. Pensar
+6. Volver al paso 1 cuando tenga hambre
+
+Los tenedores no pueden compartirse, en todo momento un tenedor estará libre o asignado a un solo filósofo, pero nunca a dos simultáneamente. Si un filósofo observa que el tenedor que necesita en el paso 1 o 2 está siendo usado por su filósofo vecino, espera educadamente a que éste termine y lo libere.
+
+Y una vez más, en un contexto concurrente, algo que aparentemente parece simple, se puede convertir en un problema.
+
+Si dos filósofos contiguos intentan tomar el mismo tenedor a la vez, se produce una *condición de carrera*, ambos compiten por el mismo recurso, y uno de ellos se queda sin comer.
+
+Si todos los filósofos empezaran a la vez con su algoritmo, todos podrían obtener su tenedor derecho. Pero al intentar obtener el tenedor izquierdo, ninguno de ellos lo conseguiría. Todos observarían que dicho tenedor ya está asignado a su vecino. Así que todos ellos pasarían a esperar a que dicho tenedor se quedara libre, pero eso nunca sucedería. Esto se llama interbloqueo o *deadlock*.
+
+Hay varías soluciones posibles.
+
+- Turnos cíclicos, se empieza por un filósofo, que si quiere puede decidir comer y pasar su turno al siguiente. Cada filósofo puede comer solo durante su turno. El problema es que si hay muchos filósofos, alguno puede llegar a morir de inanición antes de que le llegue su turno.
+
+- Varios turnos simultáneos, cada filósofo que puede comer (es su turno) tiene una ficha que después pasa a la derecha. Si hubiera 7 filósofos, se pueden poner 3 fichas en posiciones alternas. Hay turnos de tiempo fijo, por ejemplo, cada 5 minutos se pasan las fichas y turnos a la derecha. En función del tiempo que tarden los filósofos en comer y en volver a tener hambre, el tiempo de turno establecido puede hacer que sea peor solución que la anterior. Si tiempo de turno se aproxima al tiempo medio que tarda un filósofo en comer esta variante puede funcionar bien. Si además el tiempo medio de comer es similar al tiempo medio en volver a tener hambre esta solución es óptima.
+
+- Colas de tenedores, cuando un filósofo quiere comer se pone en la cola de los dos tenedores que necesita. Cuando un tenedor está libre lo coge. Cuando los coge, come y los libera. Desde el otro lado, cada tenedor sólo puede tener dos filósofos en cola, siempre los mismos. Esto mantiene el problema de los *deadlocks*.
+
+- Resolución de conflictos en las colas de tenedores, cada vez que un filósofo tiene un tenedor espera un tiempo aleatorio para conseguir el segundo tenedor. Si en ese tiempo no queda libre el segundo tenedor, suelta el que tiene y vuelve a ponerse en cola para sus dos tenedores. Si un filósofo suelta un tenedor (porque ha comido o porque ha esperado demasiado tiempo con solo un tenedor en la mano) pero todavía quiere comer, vuelve a ponerse en cola para ese tenedor. Si un filósofo contiguo está ya en esa cola de tenedor (tiene hambre), lo coge y si no vuelve al filósofo anterior. Es importante en este caso que el tiempo de espera sea aleatorio, o se mantendría el bloqueo del sistema.
+
+- Portero en el comedor, se les dice a los filósofos que cuando no tengan hambre deben abandonar la mesa, y que no regresen a ella hasta que no vuelvan a sentir hambre, cada filósofo se sienta en la misma silla. La misión del portero es controlar el número de filósofos en la sala, limitando su número a *n-1*, puesto que si hay *n-1* comensales seguro que al menos uno puede comer con los dos tenedores.
+
+<link rel="stylesheet" href="res/md/viu.css">
+<style class="fallback">body{visibility:hidden}</style><script>markdeepOptions={tocStyle:'long'};</script>
+<!-- Markdeep: --><script src="res/md/markdeep.min.js?" charset="utf-8"></script>

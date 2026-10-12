@@ -1,0 +1,823 @@
+<meta charset="utf-8">
+**22GIAR - 004 - Compartiendo datos entre hilos**
+    <small>©2026 VIU - 22GIAR Programación Concurrente, Distribuida y Paralela - Iván Fuertes</small>
+
+# Introducción
+
+Uno de los beneficios más importantes de usar hilos en programación concurrente es la potencial facilidad para compartir datos entre ellos fácil y directamente. Pero, si se están compartiendo datos entre hilos, se necesitan establecer unas reglas para cada hilo que puede acceder a ellos, y como cualquier actualización de estos datos es comunicada al resto de hilos que tienen relación con los mismos. La facilidad con la que los datos se pueden compartir entre múltiples hilos es un solo proceso no es solo una ventaja, también puede ser un gran inconveniente. El uso incorrecto de lo datos compartidos es una de las mayores causas de bugs relacionados con la concurrencia, y las consecuencias pueden ser importantes.
+
+# Problemas de compartir datos entre hilos
+
+Los problemas con los datos compartidos entre hilos siempre vienen a causa de las consecuencias de modificar dichos datos. Si todos los datos compartidos son de solo lectura, entonces no hay problema, puesto que los datos leídos por un hilo no se ven afectados si otro hilo está leyendo esos mismos datos. Pero si a estos datos compartidos entre varios hilos, uno de estos hilos empieza a modificarlos, entonces aparece el potencial para crear problemas. En ese caso, el programador debe asegurarse de que todo va a funcionar correctamente.
+
+Un concepto ampliamente usado para ayudar a los programadores a pensar correctamente sobre su código es el de los invariantes. Estos son declaraciones que siempre son ciertas sobre una estructura de datos en particular, como "esta variable contiene el número de elementos en la lista". Estos invariantes a menudo se rompen durante una actualización de datos, especialmente si la estructura de datos tiene cierta complejidad o la actualización requiere la modificación de más de una valor.
+
+Por ejemplo, una lista doblemente enlazada, donde cada nodo de la lista tiene un puntero al siguiente nodo y también al nodo anterior. Uno de los invariantes es que si se sigue un puntero *next* de un nodo *A* a otro nodo *B*, el puntero *previous* del nodo *B* nos devuelve al nodo *A*.
+
+Para eliminar un nodo de una lista, los nodos en cada lado de este nodo tienen que ser actualizados para que se apunten uno a otro. Una vez uno se ha actualizado, el invariante se rompe hasta que el nodo en el otro lado se actualiza también, una vez esto sucede, el invariante vuelve a funcionar.
+
+![Figure [res/004_001]: Eliminar un nodo de una lista doblemente enlazada](res/004_001.png)
+
+Los pasos a seguir para eliminar un nodo de una lista doblemente enlazada son:
+
+1. Identificar el nodo N a eliminar
+2. Actualizar el puntero del nodo anterior a N para apuntar al nodo posterior de N
+3. Actualizar el puntero del nodo posterior a N para apuntar al nodo anterior a N
+4. Eliminar el nodo N
+
+Entre los pasos 2 y 3, los punteros que van en una dirección son inconsistentes con los punteros que van en la dirección opuesta, y el invariante se rompe.
+
+El potencial problema más simple por ls modificación de datos compartidos entre hilos es el de los invariantes rotos. Si no se hace nada especial, si un hilo está leyendo la lista doblemente enlazada mientras que otro está eliminando un nodo, es bastante posible que el hilo que está leyendo vea la lista con un nodo parcialmente eliminado (solo uno de los punteros ha cambiado), y por tanto el invariante esta roto. Las consecuencias de esto pueden ser variables, si el otro hilo está leyendo elementos de la lista de izquierda a derecha, se saltará el nodo que se está borrando. Pero, si este segundo hilo intenta eliminar el nodo más a la derecha en el diagrama, puede acabar corrompiendo toda la estructura de datos y quizás haciendo que la aplicación explote. En cualquier caso, es un ejemplo de la causa de errores más frecuente en código concurrente, una *condición de carrera*.
+
+## Condiciones de carrera
+
+En concurrencia, una condición de carrera es cualquier cosa donde el resultado depende del orden relativo de la ejecución de algunas operaciones en dos o más hilos. Los hilos compiten para realizar sus respectivas operaciones. La mayor parte del tiempo, este problema es bastante benigno puesto que todos los resultados posibles son aceptables, aunque los resultados puedan cambiar con diferentes ordenes de salida. Por ejemplo, si dos hilos están añadiendo elementos a una cola para procesamiento, normalmente no suele importar que elemento se añade antes, mientras que los invariantes del sistema se mantengan. Pero es cuando una condición de carrera lleva a algún invariante roto donde existe un problema, como el ejemplo anterior de la lista doblemente enlazada. En el contexto de programación concurrente, el termino *condición de carrera* hace referencia siempre a una que sea problemática, las condiciones de carrera benignas no son muy interesantes y no suelen ser causa de problemas. Incluso el standard de C++ define el termino condición de carrera, como aquella específica que aflora a través de una modificación concurrente a un objeto único, las condiciones de carrera siempre acaban en el temido *undefined behavior*.
+
+Las condiciones de carrera problemáticas suelen ocurrir cuando para realizar una operación hay que modificar dos o más trozos distintos de datos, como los dos punteros de la lista anterior. Puesto que la operación debe acceder a dos trozos separados de datos, estos deben modificarse en instrucciones separadas, y otro hilo puede potencialmente acceder a la estructura de datos cuando solo una de esas modificaciones se ha completado. Las condiciones de carrera suelen ser complicadas de encontrar y de reproducir puesto que la ventana de oportunidad es pequeña. Si las modificaciones se realizan como instrucciones de CPU consecutivas, la probabilidad de que el problema se muestre en una sola ejecución es pequeña, incluso aunque la estructura de datos sea accedida por otro hilo. Conforme la carga al sistema se incrementa, el número de veces que se realiza la operación también lo hace, y por tanto, la probabilidad de que la secuencia problemática de instrucciones aparezca aumenta. Es casi inevitable que estos problemas aparezcan en el momento menos conveniente. Y puesto que estas condiciones de carrera suelen ser sensibles a la temporalización, desaparecen completamente cuando la aplicación se ejecuta bajo un *debugger*, puesto que el uso de este afecta aunque sea mínimamente a esta temporalización. La mayor parte de la complejidad de escribir código concurrente viene de evitar las condiciones de carrera.
+
+## Evitar condiciones de carrera problemáticas
+
+Hay muchas maneras de tratar con las condiciones de carrera problemáticas. La opción más simple es envolver a las estructuras de datos con un mecanismo de protección para asegurar que solo el hilo que está realizando una modificación puede ver los estados intermedios donde los invariantes pueden estar rotos. Desde el punto de vista del resto de hilos accediendo a esta estructura de datos, estas modificaciones o no han empezado o están completadas en su totalidad.
+
+Otra opción es modificar el diseño de estas estructuras de datos y sus invariantes para que las modificaciones se realicen como una serie de cambios indivisibles, cada uno de ellos preservando los invariantes. A esto se le suele llamar *lock-free programming* y es realmente complicado. Trabajar a este nivel, requiere tener un buen conocimiento del modelo de memoria e identificar bien que hilos pueden potencialmente ver que conjuntos de valores.
+
+Otra forma de manejar las condiciones de carrera es manejar las actualizaciones de las estructuras de datos como *transacciones*, tal como hacen las bases de datos con las operaciones de actualización. Las series de modificaciones y lecturas a los datos se hacen dentro del contexto de una transacción. Estos se almacenan en un registro y se realizan en un solo paso ó *commit*. Si este commit no se puede realizar porque la estructura de datos ha sido modificada por otro hilo, entonces la transacción se reinicia. A este mecanismo se llama *memoria transaccional* (Software Transactional Memory) o *STM*.
+
+El mecanismo más básico para proteger los datos compartidos en C++ que viene del standard es el *mutex*.
+
+# Protegiendo datos compartidos con mutexes
+
+Se tiene una estructura de datos compartida, como la lista enlazada del ejemplo anterior, y se quiere proteger de condiciones de carrera y los posibles invariantes rotos que puedan suceder. Se pueden marcar todos los trozos de código que accedan a esta estructura de datos como mutuamente exclusivos, así, si un hilo está ejecutándose en uno de estos trozos, cualquier otro hilo que quiera acceder se tiene que esperar hasta que el primer hilo acabe. De esta manera, sería imposible que un hilo viera un invariante roto excepto cuando sea el hilo realizando la modificación.
+
+Esto es exactamente un *mutex* (mutual exclusion), una primitiva de sincronización. Antes de acceder a los datos compartidos, se bloquea el *mutex* asociado con dichos datos, y cuando se acaba con ellos, se desbloquea el *mutex*. La librería de hilos de C++ asegura que una vez un hilo bloquea un mutex específico, todos los demás hilos que intenten bloquear el mismo mutex tienen que esperar hasta que el hilo que lo tiene bloqueado acabe su trabajo y lo desbloquee. Esto asegura que todos los hilos tengan un visión consistente de los datos compartidos, sin ningún invariante roto.
+
+Los mutexes son el mecanismo más general de protección de datos en C++, pero no son una solución para todo, es importante estructurar el código para proteger los datos correctos, y evitar condiciones de carrera inherentes en los interfaces. Los mutexes también vienen con sus propios problemas en la forma de *deadlocks* y la protección excesiva o insuficiente de las estructuras de datos compartidas.
+
+## Mutex en C++
+
+En C++ se crea un *mutex* construyendo una instancia de `std::mutex`, se bloquea con una llamada a `lock()` y se desbloquea con `unlock()`. Pero no se recomienda llamar a las funciones miembro directamente, puesto que esto significa que hay que acordarse de llamar a `unlock()` en cada path de código de una función, incluyendo los relativos a excepciones. En su lugar, la librería de C++ ofrece la clase templatizada `std::lock_guard`, que implementa el idiom *RAII* (*Resource Acquisition Is Initialization*), el cual bloquea el *mutex* en la construcción y lo desbloquea en la destrucción, asegurando que un *mutex* bloqueado siempre se desbloquea correctamente.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <list>
+#include <mutex>
+#include <algorithm>
+
+std::list<int> list;
+std::mutex mutex;
+
+void addToList(int new_value) {
+  std::lock_guard<std::mutex> guard(mutex);
+  list.push_back(new_value);
+}
+
+bool contains(int value) {
+  std::lock_guard<std::mutex> guard(mutex);
+  return std::find(list.begin(), list.end(), value) != list.end();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [lock_guard1]: Protegiendo Datos con un *mutex*]
+
+En este ejemplo, se protege una lista a la que se puede acceder desde múltiples hilos usando un `std::mutex` junto a `std::lock_guard`, ambos declarados en el header `<mutex>`. Hay una variable global para la lista, y está protegida con su correspondiente instancia global de un `std::mutex`. El uso de `std::lock_guard<std::mutex>` en las funciones `addToList` y `contains` hace que los accesos a estas funciones sean mutuamente excluyentes, la función `contains` nunca verá la lista a mitad de una actualización de `addToList`.
+
+En C++ 17 se implementó la deducción de argumentos de clases templatizadas, de tal manera que para clases templatizadas simples, como `std::lock_guard`, se puede omitir el tipo.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::lock_guard guard(mutex);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [lock_guard2]: Protegiendo Datos con un *mutex*]
+
+Aunque hay veces que el uso de variables globales es apropiado, en la mayor parte de los casos, es habitual agrupar el *mutex* y los datos protegidos juntos en una clase. Es una aplicación de las reglas de diseño de la programación orientada a objetos, así se establece que son cosas relacionadas y se puede encapsular su funcionalidad y reforzar la protección. En ese caso, las funciones anteriores `addToList` y `contains` se convertirían en métodos de dicha clase, y el mutex y los datos protegidos se volverían miembros `private` de la clase, haciendo mucho más simple identificar que código tiene acceso a los datos y por tanto, que código tiene que bloquear el mutex. Si todas las funciones miembro de la clase bloquean el mutex antes de que accedan otros miembros, y luego lo desbloquean, los datos están protegidos.
+
+Eso es cierto, excepto en algunos casos. Si una de estos métodos miembro de la clase devuelven un puntero o una referencia a los datos protegidos, entonces no importa si estos métodos bloquean el mutex de una manera limpia y ordenada, puesto que se ha abierto un agujero en la protección. Cualquier código que tenga acceso a un puntero o referencia ahora puede acceder, y potencialmente modificar a los datos compartidos sin bloquear el mutex. Proteger los datos con un mutex, por tanto, requiere diseñar cuidadosamente el interface de estas clases para asegurar que el mutex se bloquea antes de que haya ningún acceso a los datos protegidos y que no haya ninguna puerta trasera.
+
+## Estructurando el código para proteger datos compartidos
+
+Proteger los datos con un mutex no es tan fácil como parece, no es suficiente crear un objeto `std::lock_guard` en cada función miembro, un puntero o referencia perdidos y toda la protección salta por los aires. En primera instancia, verificar que no haya punteros o referencias perdidas es fácil, mientras que ningún método devuelva una referencia o puntero a los datos protegidos en su valor `return` o algún parámetro de salida, los datos están a salvo. Pero también es importante que ningún método pase estos punteros o referencias a los datos al llamar a funciones que no están bajo nuestro control. Esto es igual de peligroso, estas funciones pueden almacenar este puntero o referencia en un sitio que puede ser usado más adelante sin la protección del mutex.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class some_data {
+    int a;
+    std::string b;
+  public:
+    void do_something();
+};
+
+class data_wrapper {
+  private:
+    some_data data;
+    std::mutex m;
+  public:
+    template<typename Function> void process_data(Function func) {
+        std::lock_guard<std::mutex> l(m);
+        func(data);
+    }
+};
+
+some_data* unprotected;
+
+void malicious_function(some_data& protected_data) {
+    unprotected = &protected_data;
+}
+
+data_wrapper x;
+
+void foo() {
+    x.process_data(malicious_function);
+    unprotected->do_something();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [reference_to data]: Paso accidental de referencia a datos protegidos]
+
+Son particularmente peligrosas las funciones que se suministran en tiempo de ejecución como parámetro o algún otro mecanismo. El código en `process_data` parece inofensivo, está protegido con un `std::lock_guard`, pero la llamada a la función `func` que se pasa por parámetro implica que la función `foo` puede pasar a `process_data` la función `malicious_function` para saltarse la protección, y llamar a `do_something` sin el bloqueo del mutex.
+
+El problema fundamental en este ejemplo, es que no se marcan todos los trozos que acceden a los datos como mutuamente excluyentes. En este caso, en `foo()` que llama a `unprotected->do_something()`. En este caso, la librería de hilos de C++ no puede ayudar, es responsabilidad del programador bloquear el mutex correcto para proteger los datos. La directriz a seguir es, no pasar punteros o referencias a los datos protegidos fuera del ámbito del bloqueo, ya sea devolviéndolos desde una función, almacenándolos en memoria visible desde fuera de la estructura, o pasándolos como argumentos a funciones proporcionadas por el usuario.
+
+## Detectar condiciones de carrera inherentes
+
+Usar un mutex, o cualquier otro mecanismo para proteger datos compartidos, no significa que se esté libre de condiciones de carrera, hay que seguir protegiendo los datos. En el ejemplo anterior de la lista doblemente enlazada, para que un hilo elimine de manera segura un nodo, hay que asegurar el acceso concurrente a tres nodos, el nodo que se va a borrar y los dos contiguos a ambos lados. Si se protege el acceso a los punteros de cada nodo de manera individual, la situación no es mucho mejor que sin usar mutexes, las condiciones de carrera se podrían suceder fácilmente. No son los nodos individuales los que necesitan protección, sino la estructura de datos completa, para la operación completa de eliminación de nodos. La solución más simple en este caso, es la propuesta en Listing [lock_guard2], donde un solo mutex protege la lista entera.
+
+Pero, aunque las operaciones individuales en la lista sean seguras, no significa que esté libre de condiciones de carrera, incluso trabajando con una simple implementación. Se tiene una estructura de datos como una pila, en este caso a través del contenedor `std::stack`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+template<typename T,typename Container=std::deque<T> >
+class stack {
+  public:
+    explicit stack(const Container&);
+    explicit stack(Container&& = Container());
+    template <class Alloc> explicit stack(const Alloc&);
+    template <class Alloc> stack(const Container&, const Alloc&);
+    template <class Alloc> stack(Container&&, const Alloc&);
+    template <class Alloc> stack(stack&&, const Alloc&);
+
+    bool empty() const;
+    size_t size() const;
+    T& top();
+    T const& top() const;
+    void push(T const&);
+    void push(T&&);
+    void pop();
+    void swap(stack&&);
+    template <class... Args> void emplace(Args&&... args);
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [stack]: Interfaz del contenedor `std::stack`]
+
+Además de los diversos constructores y el método `swap()`, hay solo 5 cosas que se pueden hacer con una pila como esta. Se puede llamar a `push()` para introducir un nuevo elemento en la pila, sacar un elemento con `pop()`, leer el elemento de arriba con `top()`, verificar si está vacía con `empty()` y ver el número de elementos con `size()`. Si se cambia la función `top()` para devolver una copia en lugar de una referencia (como se aconsejaba en el apartado anterior) y se protege a los datos internos con un mutex, aún así el diseño de este interfaz está inherentemente sujeto a condiciones de carrera. No es un problema único a las implementaciones basadas en mutex, es un problema de diseño del interfaz, y aunque se usara una implementación *lock-free* seguirían ocurriendo.
+
+El problema aquí es que los resultados de `empty()` y `size()` no son fiables. Pese a que sean correctos en el momento de su llamada, una vez han devuelto su valor, otros hilos pueden acceder a la pila y pueden introducir `push()` nuevos elementos o eliminar `pop()` otros de la pila mientras que el hilo que ha llamado a `empty()` o `size()` aún no haya podido usar dicha información.
+
+En particular, si la instancia de la pila no es compartida, es seguro verificar el valor de `empty()` para luego acceder al elemento `top()` para acceder a este elemento si la pila no está vacía.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+stack<int> s;
+if(!s.empty()) {
+    int const value=s.top();
+    s.pop();
+    do_something(value);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [empty_top]: Acceder a `top` tras verificar que la lista tiene elementos]
+
+No es que sea seguro en código monohilado, es que es la manera correcta, llamar a `top()` sobre una pila vacía es *undefined behavior*. Con una pila compartida, esta secuencia de código ya no es segura. Puede haber una llamada a `pop()` desde otro hilo que elimine el último elemento entre la llamada a `empty()` y `top()` del primer hilo. Esta es una condición de carrera clásica, y el uso de un mutex para proteger el contenido de la pila no lo previene, es una consecuencia del diseño del interface.
+
+Como el problema es este diseño, la solución es cambiarlo. En el caso más simple, se puede hacer que `top()` lance una excepción si no hay elementos en la pila cuando se llame, pero esto hace que la programación se vuelva compleja, habría que ser capaz de capturar una excepción, incluso aunque la llamada a `empty()` fuera `false`. Esto convierte a la llamada a `empty` una optimización para evitar el sobrecoste de lanzar una excepción si la pila ya está vacía (aunque si el estado cambia entre la llamada a `empty()` y a `top()` la excepción se lanzará de todas maneras), en lugar de una parte necesaria del diseño.
+
+Incluso hay otra potencial condición de carrera, pero esta vez entre la llamada a `top()` y `pop()`. Dos hilos concurrentes que estén usando la misma instancia del objeto `stack` puede ser bastante habitual, al usar concurrencia para mejorar el rendimiento, es habitual tener muchos hilos ejecutando el mismo código en distintas partes de los datos, y un objeto `stack` es ideal para dividir el trabajo entre ellos. Si una pila inicialmente tiene dos elementos, no hay que preocuparse por la condición de carrera entre `empty()` y `top()` en cualquiera de los dos hilos. Si la pila está protegida internamente con un mutex, solo un hilo puede ejecutar sus funciones miembros en un momento determinado, así que las llamadas se intercalan correctamente, pero las llamadas a `do_something()` se pueden ejecutar de manera concurrente.
+
+H0 | H1
+:--------|:--------
+if(!s.empty()) | _
+_ | if(!s.empty())
+int const value=s.top(); | _
+_ | int const value=s.top();
+s.pop(); | _
+do_something(value); | s.pop();
+_ | do_something(value);
+[Table [stack_2]: Timeline de uso de `stack`]
+
+Si solo están los dos hilos en ejecución, no hay nada entre las dos llamadas a `top()`, por lo que ambos hilos recibirán el mismo valor. No solo eso, com no hay nada entre las llamadas a `top()` y `pop()`, uno de los dos valores de la pila se descartará sin llegar a ser leído, mientras que el otro se procesa dos veces. Esta es otra condición de carrera, y aún peor que el anterior *undefined behavior* entre `empty()` y `top()`. Aquí no hay nada aparentemente incorrecto, y las consecuencias de este bug se alejan de la causa del mismo, puesto que dependen exactamente de lo que haga la función `do_something()`.
+
+Esto promueve un cambio aún más radical al interfaz de la pila, una que combine las llamadas a `top()` y `pop()` bajo la protección del mutex. Pero esto puede traer problemas si el constructor de copia de los objetos dentro de la pila puede lanzar una excepción.
+
+Por ejemplo, un pila que contenga vectores de enteros `stack<vector<int>>`, un vector es contenedor que se dimensiona de manera dinámica. Con lo cual, cuando se copia un vector, la librería de C++ tiene que reservar cierta cantidad de memoria del *heap* para copiar sus contenidos. Si el sistema está bajo mucha carga o con limitaciones de recursos, esta asignación de memoria puede fallar, y el constructor de copia del vector puede lanzar una excepción `std::bad_alloc`. Esto suele pasar cuando el vector tiene muchos elementos. Si la función `pop()` está definida para devolver el valor que se ha eliminado de la pila, además de eliminarlo de la misma, hay un problema potencial, el valor se devuelve cuando se la pila ya ha sido modificada, pero el proceso de la copia de datos puede lanzar una excepción. Si esto sucede, los datos que se sacan de la pila se pierden, han sido eliminados de la pila, pero la copia ha fallado. Los diseñadores de la interfaz de `std::stack` dividieron la operación en dos pasos, obtener el primer elemento en la pila `top()` y eliminarlo de la misma `pop()`, para que si no se pueden copiar los datos correctamente, estos permanezcan en la pila. Si el problema era la falta de memoria, el programa puede liberar algo de memoria y reintentar la operación.
+
+Pero, por desgracia, es precisamente esta separación en dos operaciones lo que se intenta evitar para eliminar la condición de carrera. Hay alternativas, pero tienen un coste asociado.
+
+#### Pasar una referencia
+
+La primera opción es pasar una referencia a una variable en la cual se quiera recibir el valor eliminado como argumento a la llamada a `pop()`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::vector<int> result;
+some_stack.pop(result);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [opt1]: Pasar referencia]
+
+Eso funciona bien la mayoría de las veces, pero tiene el inconveniente que requiere que el código que realiza la llamada construya una instancia del tipo del valor de la pila antes de la llamada, para pasarlo como destino. Para algunos tipos esto es poco práctico, puesto que construirlos puede ser caro en términos de tiempo o recursos. Para otros tipos, esto ni siquiera es posible, puesto que a veces los constructores necesitan parámetros que pueden no estar disponibles en ese momento del código. Y además, se necesita que el tipo almacenado sea asignable. Y esta es una restricción importante, muchos tipos definidos por el usuario no soportan asignación, a pesar que puedan soportar construcción por copia o movimiento.
+
+#### Pedir un constructor de copia o de movimiento que no lance excepciones
+
+Solo hay un problema de seguridad de excepciones con un `pop()` que devuelva valores, si ese valor devuelto puede lanzar excepciones. Muchos tipos tienen constructores de copia que no lanzan excepciones, y con el soporte para referencias de *r-value*, muchos más tipos tienen constructores de movimiento que no lanzan excepciones, aunque el constructor de copia lo haga. Una opción válida es restringir el uso de la pila multihilo a esos tipos que se pueden devolver de manera segura pro valor sin lanzar una excepción.
+
+Pese a que sea seguro, no es lo ideal. Incluso aunque se pueda detectar en tiempo de compilación la existencia de un constructor de copia o de movimiento que no lance excepciones usando los *type traits* `std::is_nothrow_copy_constructible` y `std::is_nothrow_move_constructible`, es bastante limitante. Hay muchos más tipos definidos por el usuario con constructores de copia que pueden lanzar excepciones que no tienen constructores de movimiento que tipos con constructores de copia o movimiento que no lancen excepciones. Y no sería deseable que esa mayoría de tipos no se pudieran guardar en esta pila.
+
+#### Devolver un puntero al elemento eliminado
+
+La tercera opción es devolver un puntero al elemento eliminado de la pila en lugar de devolver el elemento por valor. La ventaja aquí es que los punteros se pueden copiar libremente sin lanzar excepciones. La desventaja es que esto supone gestionar la memoria del objeto, y para tipos simples como enteros, el sobrecoste de esta gestión de memoria puede exceder el coste de devolver el tipo por valor. Para cualquier interfaz que quiera usar esta opción, un `std::shared_ptr` sería una buena opción para el tipo del puntero. No solo evita perdidas de memoria, puesto que el objeto se destruye cuando el último puntero se destruye, si no que la librería de C++ tiene el control total sobre la gestión de memoria y no hay que usar `new` y `delete`. Esto puede ser importante de cara a optimizaciones, pedir que cada objeto en la pila se asigne separadamente con un `new` puede suponer un sobrecoste importante a la versión de la pila monohilada.
+
+#### Usar la opción 2 o 3, además de la 1
+
+La flexibilidad puede ser importante, especialmente en código genérico. Si se opta por la opción 2 o 3, es relativamente fácil implementar también la opción 1, puesto que esto permite a los usuarios del código la opción de elegir que opción puede ser mejor para ellos al mínimo coste.
+
+#### Ejemplo de pila `thread safe`
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <exception>
+#include <memory>
+
+struct empty_stack :std::exception {
+    const char* what() const noexcept;
+};
+
+template<typename T> class threadsafe_stack {
+  public:
+    threadsafe_stack();
+    threadsafe_stack(const threadsafe_stack&);
+    threadsafe_stack& operator=(const threadsafe_stack&) = delete;
+    void push(T new_value);
+    std::shared_ptr<T> pop();
+    void pop(T& value);
+    bool empty() const;
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread_safe_stack]: Interfaz de pila `thread safe`]
+
+Esta es una posible definición de clase para una pila sin condiciones de carrera en el interfaz que implementa las opciones 1 y 3. El método `pop()` está sobrecargado, tienen dos signatures, una recibe una referencia a un argumento donde almacenar el valor de vuelta, y otra que devuelve un `std::shared_ptr`. Tiene un interfaz simple, con solo dos funciones `push()` y `pop()`.
+
+Al reducir el interfaz, se maximiza la seguridad, incluso las operaciones a realizar en toda la pila se restringen. La pila en sí misma no puede ser asignada, se ha borrado el operador de asignación, y no hay función `swap()`. Sin embargo, puede ser copiada, asumiendo que los elementos de la pila permiten la copia. La funciones `pop()` lanzar una excepción `empty_stack` si la pila está vacía, con lo cual, todo funciona incluso aunque la pila se modifique tras una llamada a `empty()`. El uso de un `std::shared_ptr` permite a la pila gestionar los problemas de memoria y evitar llamadas excesivas a `new` y `delete`. Las cinco operaciones en la pila se han convertido en tres, `push()`, `pop()` y `empty()`. Incluso `empty()` puede resultar prescindible. Esta simplificación del interfaz permite un mejor control sobre los datos, se puede asegurar que el mutex se bloquea durante la ejecución de cualquier operación.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <stack>
+
+struct empty_stack:std::exception {
+    const char* what() const throw();
+};
+
+template<typename T> class threadsafe_stack {
+  private:
+    std::stack<T> data;
+    mutable std::mutex m;
+  public:
+    threadsafe_stack() {}
+
+    threadsafe_stack(const threadsafe_stack& other) {
+        std::lock_guard<std::mutex> lock(other.m);
+        data=other.data;
+    }
+
+    threadsafe_stack& operator=(const threadsafe_stack&) = delete;
+
+    void push(T new_value) {
+        std::lock_guard<std::mutex> lock(m);
+        data.push(std::move(new_value));
+    }
+
+    std::shared_ptr<T> pop() {
+        std::lock_guard<std::mutex> lock(m);
+        if(data.empty()) throw empty_stack();
+        std::shared_ptr<T> const res(std::make_shared<T>(data.top()));
+        data.pop();
+        return res;
+    }
+
+    void pop(T& value) {
+        std::lock_guard<std::mutex> lock(m);
+        if(data.empty()) throw empty_stack();
+        value=data.top();
+        data.pop();
+    }
+
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(m);
+        return data.empty();
+    }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread_safe_stack_2]: Implementación de pila `thread safe`]
+
+Esta implementación de pila actúa como un *wrapper* de `std::stack` añadiendo características que la hacen *thread safe*. Esta pila es copiable, el constructor de copia bloquea el mutex en el objeto origen y entonces copia el objeto `stack` interno. Se hace la copia en el cuerpo del constructor en lugar de en la lista de inicializadores de miembros para asegurar que el mutex se mantiene bloqueado durante la copia.
+
+Este tipo de condiciones de carrera problemáticas, como el mostrado entre `top()` y `pop()`, surgen en interfaces como consecuencia de realizar bloqueos con una granularidad demasiado pequeña, la protección no cubre toda la operación en su totalidad. A veces, surgen problemas en el otro extremo, por una granularidad demasiado grande, una situación extrema puede ser un único mutex global que proteja todos los datos compartidos. En un sistema donde existan muchos datos compartidos, esto puede directamente eliminar cualquier beneficio de rendimiento por la concurrencia, puesto que los hilos acaban por estar forzados a ejecutarse de uno en uno, incluso aunque esté accediendo a diferentes partes de los datos. Versiones primigenias de kernel de Linux que estaban diseñadas para sistemas multi procesador usaban un único bloqueo global del kernel. Funcionaba, pero eso implicaba que un sistema con dos procesadores era más lento que dos sistemas con un solo procesador cada uno. Existía mucha contención para el kernel, por lo que los hilos ejecutándose en el resto de procesadores no eran capaces de realizar ningún trabajo.
+
+Un problema de los sistemas de bloqueo con granularidad fina es que se suele necesitar de más de un mutex bloqueado para proteger todos los datos en una operación. A veces, la opción correcta es incrementar la granularidad de los datos cubiertos por el mutex, de tal manera que solo haya que bloquear un mutex. Pero a veces no es deseable, como cuando los mutexes están protegiendo distintas instancias de una clase. En este caso, bloquear en el siguiente nivel superior significaría delegar el bloqueo al usuario o tener un solo mutex que protegiera a todas las instancias de esa clase, y ninguna de esas dos soluciones es buena.
+
+Si finalmente se acaban con dos o más mutexes para una operación determinada, hay otro potencial problema acechando en las sombras, el *deadlock*. Es casi lo opuesto a una condición de carrera, en lugar de dos hilos compitiendo por ver quien llega antes, cada uno está esperando al otro, en un interbloqueo, así que ninguno progresa.
+
+## Deadlock
+
+Hay un par de hilos, y cada uno de ellos necesita bloquear dos mutexes para realizar alguna operación, y cada hilo tiene un mutex y está esperando al otro. Ninguno de esos dos hilos puede progresar, puesto que cada uno está esperando a que el otro libere el mutex. Este escenario es un *deadlock*, y es el mayor problema cuando hay que bloquear dos o más mutexes para realizar una operación.
+
+El consejo más habitual para evitar deadlocks es siempre bloquear los dos mutexes en el mismo orden, si siempre se bloquea el mutex A antes que el mutex B, nunca se llegará a la situación de deadlock. A veces esto es directo y sencillo, porque los mutexes sirven a diferentes objetivos, pero otras veces no lo es, como cuando los mutexes están cada uno protegiendo instancias distintas de la misma clase. Por ejemplo, una operación que intercambia datos entre dos instancias de la misma clase, para segurar que los datos se intercambian correctamente, para evitar modificaciones concurrentes, los mutexes en las dos instancias deben estar bloqueados. Pero si fija un orden (por ejemplo, bloquear el mutex de la instancia que llega como primer parámetro y luego el que llega como segundo parámetro) puede fallar, todo lo que se necesita es dos hilos intentando intercambiar datos entre las dos mismas instancias con los parámetros intercambiados, y se tiene un deadlock.
+
+Afortunadamente, la librería standard de C++ tiene una solución para esto, `std::lock` es una función que puede bloquear dos o más mutexes de una vez sin el riesgo de un deadlock.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class some_big_object;
+
+void swap(some_big_object& lhs,some_big_object& rhs);
+
+class X {
+  private:
+    some_big_object some_detail;
+    std::mutex m;
+  public:
+    X(some_big_object const& sd):some_detail(sd){}
+
+    friend void swap(X& lhs, X& rhs) {
+        if(&lhs==&rhs)
+            return;
+        std::lock(lhs.m,rhs.m);
+        std::lock_guard<std::mutex> lock_a(lhs.m,std::adopt_lock);
+        std::lock_guard<std::mutex> lock_b(rhs.m,std::adopt_lock);
+        swap(lhs.some_detail,rhs.some_detail);
+    }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [lock]: Uso de `std::lock` y `std::lock_guard` en una operación de swap]
+
+Primero se verifica que ambos argumentos sean de diferentes instancias, puesto que intentar bloquear un mutex cuando ya se ha bloqueado nos lleva a *undefined behavior*. Un mutex que permite múltiples bloqueos por el mismo hilo es un mutex recursivo. Después, la llamada a `std::lock` bloquea los dos mutexes, y dos instancias de `std::lock_guard` se construyen, una para cada mutex. Como primer parámetro reciben el mutex ya bloqueado previamente y el parámetro `std::adopt_lock` indica a los objetos `std::lock_guard` que los mutexes ya están bloqueados y que deberían adquirir la propiedad del bloqueo en el mutex en lugar de intentar realizar el bloqueo en el constructor.
+
+Esto asegura que los mutexes se desbloquean correctamente en la salida de la función en el caso general en el que una operación protegida pueda lanzar una excepción, o través de un simple `return`. Hay que tener en cuenta también que, bloquear el mutex `lhs.m` o `rhs.m` dentro de la llamada a `std::lock` puede lanzar una excepción, en este caso la excepción se propaga fuera de `std::lock`. Si `std::lock` realiza el bloqueo con éxito en un mutex y se lanza una excepción cuando trata de realizar el bloqueo en el otro mutex, el primer bloqueo se libera automáticamente, `std::lock` ofrece una semántica de todo o nada al respecto de los bloqueos de los mutexes que se le dan.
+
+En C++ 17 se añade un template *RAII* `std::scoped_lock<>`, que es equivalente a `std::lock_guard<>`, excepto que es un *variadic template*, es decir, que puede recibir una lista de tipos de mutexes como parámetros del template, y una lista de mutexes como argumentos al constructor. Los mutexes que se le pasan al constructor se bloquean usando el mismo algoritmo que usa `std::lock`, con lo cual, cuando el constructor se completa están todos bloqueados y se desbloquean todos en el destructor.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void swap(X& lhs, X& rhs) {
+    if(&lhs==&rhs)
+        return;
+    std::scoped_lock guard(lhs.m,rhs.m);
+    swap(lhs.some_detail,rhs.some_detail);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [scoped_lock]: Uso de `std::scoped_lock` en una operación de swap]
+
+Este ejemplo usa la característica de C++ 17 de deducción automática de los parámetros de clases de templates. De esta manera, este mecanismo deducirá los tipos correctos de mutex de los tipos de los objetos pasados al constructor del objeto `std::scoped_lock`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::scoped_lock<std::mutex,std::mutex> guard(lhs.m,rhs.m);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [scoped_lock2]: Uso de `std::scoped_lock` completo]
+
+En este caso es equivalente a especificar los tipos en el template. La existencia de `std::scoped_lock` implica que en la mayoría de los casos donde antes se hubiera usado un `std::lock` ahora es preferible usar un `std::scoped_lock` para evitar potenciales errores.
+
+Pese a que el uso de `std::lock` y `std::scoped_lock` ayudan para evitar deadlocks en los casos donde hay que adquirir dos o más bloqueos juntos, no ayuda si hay que adquirirlos de manera separada. En ese caso, hay que confiar en la disciplina de los programadores para asegurar que no se llega a un deadlock. Esto no es fácil, son muchas veces impredecibles, y la mayor parte del tiempo todo funciona bien.
+
+## Evitando deadlocks
+
+Los deadlock no solo ocurren a través de los bloqueos, a pesar de ser el caso más frecuente. Se puede crear un deadlock con dos hilos sin bloqueos, si cada uno de ellos llama a `join()` del objeto `std::thread` del otro hilo. En este caso, ninguno de los dos hilos puede progresar puesto que ambos están esperando a que el otro acabe. Este simple ciclo puede suceder en cualquier parte donde un hilo puede esperar a que otro hilo acabe de realizar alguna acción si el otro hilo puede simultáneamente estar esperando al primer hilo, y no se limita a dos hilos, un ciclo de 3 o más hilos también puede causar un deadlock. La mejor idea para evitar deadlocks es no esperar a otro hilo si existe una posibilidad que este hilo esté esperando al hilo principal.
+
+### Evitar bloqueos anidados
+
+La primera idea es la más simple, no se realiza un bloqueo si ya se tiene uno. Es imposible llegar a un deadlock a través del uso de bloqueos siguiendo esta regla, puesto que cada hilo entonces solo adquiere un bloqueo único. Aún se puede llegar a un deadlock a través de otras partes (como un hilo esperando a otro), pero los bloqueos por mutex son la causa más habitual de deadlocks. Si hay que adquirir varios bloqueos, hay que hacerlos como una acción única usando `std::lock` para adquirirlos sin un deadlock.
+
+### Evitar llamar a código proporcionado por el usuario mientras se mantiene un bloqueo
+
+Esta es una continuación de la anterior. Puesto que el código es proporcionado por el usuario de nuestro código, no tenemos ni idea de lo que puede hacer, podría hacer cualquier cosa, incluso adquirir un bloqueo. Si se llama a este código sobre el cual no se tiene el control, mientras se mantiene un bloqueo, y ese código adquiere otro bloqueo, se está violando la regla de evitar bloqueos anidados y se puede llegar a un deadlock. A veces es inevitable, si se está escribiendo código genérico, como la pila anterior, cada operación sobre el tipo/s de los parámetros es código proporcionado por el usuario.
+
+### Adquirir los bloqueos en un orden fijo
+
+Si es imprescindible adquirir dos o más bloqueos, y no se pueden adquirir en una sola operación con un `std::lock`, lo mejor que se puede hacer es adquirirlos siempre en el mismo orden en cada hilo. Esto ya se ha visto antes, la clave es definir el orden de una manera que sea consistente entre todos los hilos. En algunos casos esto es relativamente fácil. Por ejemplo, en la pila anterior, el mutex es interno a cada instancia de la pila, pero las operaciones en los elementos almacenados en la pila requieren llamar a código proporcionado por el usuario de la pila. Sin embargo, se puede añadir la restricción que ninguna de las operaciones sobre los elementos de la pila deben realizar ninguna operación sobre la misma pila. Esto traslada la carga del problema al usuario de la pila, pero es relativamente inusual que los datos almacenados en un contenedor accedan a dicho contenedor, y es muy fácil detectar cuando esto sucede, así que no es una carga muy alta.
+
+En otros casos no es algo tan sencillo, como la operación swap Listing [lock]. Al menos en este caso se podían bloquear ambos mutexes simultáneamente, pero esto no siempre es posible. Volviendo al ejemplo de la lista doblemente enlazada, una posibilidad para proteger a la lista es tener un mutex por nodo. Entonces, para acceder a la lista los hilos deben adquirir un bloqueo en cada nodo en el cual están interesados. Para que un hilo pueda eliminar un nodo, primero tiene que adquirir un bloqueo en tres nodos, el nodo que se va a borrar y los dos nodos alrededor de éste, puesto que los tres sufren alguna modificación. De igual manera, para recorrer la lista, un hilo debe mantener el bloqueo en el nodo que está visitando mientras intenta adquirir el bloqueo en el siguiente nodo en la secuencia, para asegurar que el puntero `next` no se modifica entre tanto. Una vez el bloqueo sobre el siguiente nodo se ha adquirido, el bloqueo en el primer nodo ya se puede liberar puesto que no es necesario.
+
+Este estilo de bloqueo por transferencia permite que múltiples hilos accedan a la lista, siempre que cada uno esté accediendo a un nodo distinto. Pero para evitar un deadlock, los nodos deben bloquearse siempre en el mismo orden, si dos hilos intentan recorrer la lista en un orden distinto usando este sistema de bloqueos, pueden llegar a un deadlock entre ellos a mitad del recorrido de la lista. Si los nodos A y B son adyacentes en la lista, el hilo yendo en una dirección mantendrá el bloqueo en el nodo A e intentará adquirir el bloqueo en el nodo B. Un hilo yendo en la dirección opuesta, mantendrá el bloqueo en el nodo B e intentará adquirir el bloqueo sobre el nodo A, un escenario clásico para un deadlock.
+
+H0 | H1
+:--------|:--------
+Bloquea mutex nodo A | Bloquea mutex nodo C
+Lee A puntero next (B) | Lee C puntero prev (B)
+_ | Bloquea mutex nodo B
+Intenta bloquear nodo B (espera) | Desbloquea mutex nodo C
+_ | Lee B B puntero prev (A)
+_ | Intenta bloquear nodo A (espera)
+Deadlock! | Deadlock!
+[Table [dadlock]: Timeline de un deadlock con dos hilos atravesando una lista en direcciones opuestas]
+
+De igual manera, al borrar un nodo B que está entre los nodos A y C, si el hilo adquiere el bloqueo sobre B antes de los bloqueos sobre A y C, tiene el potencial de levantar un deadlock con un hilo que esté recorriendo la lista. Este hilo intentará bloquear A o C (en función de la dirección del recorrido) pero se encontrará que no puede adquirir el bloqueo del nodo B, puesto que el hilo ejecutando el operación de borrado ya lo tiene bloqueado y esta intentando obtener el bloqueo de A y C.
+
+Una forma de prevenir estos deadlocks es definir un orden de recorrido del contenedor, así un hilo siempre tiene que bloquear A antes de B, y B antes de C. Esto elimina la posibilidad de un deadlock a costa de deshabilitar el recorrido inverso. Se pueden establecer convenciones similares para otras estructuras de datos.
+
+### Usar una jerarquía de bloqueos
+
+Este es un caso particular de definir el orden de los bloqueos, una jerarquía de bloqueo puede proporcionar un medio para comprobar que la convención se cumple en tiempo de ejecución. La idea es dividir la aplicación en capas e identificar todos los mutexes que se pueden bloquear en cada capa. Cuando el código intenta bloquear un mutex, no tiene permitido bloquear ese mutex si ya tiene adquirido un bloqueo sobre una capa inferior. Se puede comprobar esto en tiempo de ejecución asignándole números de capa a cada mutex y manteniendo un registro de que mutexes están bloqueados por cada hilo. Es un patrón bastante común, pero la librería standard de C++ no tiene soporte directo para ello, así que toca implementar un tipo personalizado `hierarchical_mutex` para ello.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+hierarchical_mutex high_level_mutex(10000);
+hierarchical_mutex low_level_mutex(5000);
+hierarchical_mutex other_mutex(6000);
+
+int do_low_level_stuff();
+
+int low_level_func() {
+    std::lock_guard<hierarchical_mutex> lk(low_level_mutex);
+    return do_low_level_stuff();
+}
+
+void high_level_stuff(int some_param);
+
+void high_level_func() {
+    std::lock_guard<hierarchical_mutex> lk(high_level_mutex);
+    high_level_stuff(low_level_func());
+}
+
+void thread_a() {
+    high_level_func();
+}
+
+void do_other_stuff();
+
+void other_stuff() {
+    high_level_func();
+    do_other_stuff();
+}
+
+void thread_b() {
+    std::lock_guard<hierarchical_mutex> lk(other_mutex);
+    other_stuff();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [hierarchical_mutex_use]: Uso de un mutex jerárquico]
+
+Este código muestra el uso de mutexes jerárquicos, tiene tres instancias de un tipo `hierarchical_mutex` que se construyen con números de jerarquía distintos. Este mecanismo está definido de manera que si se adquiere un bloqueo sobre un `hierarchical_mutex`, entonces solo se puede bloquear otro `hierarchical_mutex` con una jerarquía inferior, y esto impone restricciones en lo que el código puede hacer.
+
+Asumiendo que la función `low_level_func` no bloquea ningún mutex, `low_level_func`está en el fondo de la jerarquía, y bloquea el `low_level_mutex`. La función `high_level_func` llama a `low_level_func`, mientras tiene un bloqueo sobre `hig_level_mutex`, pero eso es correcto, puesto que el nivel de jerarquía de `high_level_mutex`, 10000, es más alto que el de `low_level_mutex`, 5000.
+
+Por otro lado, la función `thread_b()` ignora las reglas y, por tanto, fallará en tiempo de ejecución. Primero bloquea `other_mutex`, que tiene un valor de jerarquía de 6000, que debe estar a mitad de jerarquía. Cuando `other_stuff()` llama a `high_level_func()`, está violando la jerarquía, `high_level_func()` intenta bloquear a `high_level_mutex`, que tiene un valor de 10000, más alto que el actual de 6000. En ese punto el `hierarchical_mutex` notificará un error, posiblemente lanzando una excepción o abortando el programa. Los deadlocks entre mutexes jerárquicos son imposibles, puesto que los mismos mutexes imponen el orden del bloqueo. Esto significa que no se pueden tener dos bloqueos al mismo tiempo si están en el mismo nivel en la jerarquía, por lo que sistemas de bloqueo de transferencia (como el visto para recorrer una lista) requieren que cada mutex en la cadena tenga una jerarquía menor que el anterior, lo que puede ser poco práctico.
+
+Este ejemplo también demuestra otra cosa, el uso del template `std::lock_guard<>` con un tipo de mutex definido por el usuario. El tipo `hierarchical_mutex`no es parte del standard pero es fácil de escribir. Aún siendo un tipo definido por el usuario, se puede usar con `std::lock_guard<>` porque implementa las tres funciones miembro que hay que satisfacer para el concepto de mutex, `lock()`, `unlock()` y `try_lock()`. Aún no se ha visto el uso de `try_lock()`, pero es simple, si el bloqueo en el mutex lo tiene otro hilo, devuelve `false` en lugar de esperar hasta que el hilo pueda adquirir el bloqueo sobre el mutex. También se puede usar con `std::lock()` internamente, como parte del algoritmo de eliminación de deadlocks.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class hierarchical_mutex {
+  public:
+        explicit hierarchical_mutex(unsigned long value):
+            hierarchy_value(value), previous_hierarchy_value(0) {}
+
+        void lock() {
+            check_for_hierarchy_violation();
+            internal_mutex.lock();
+            update_hierarchy_value();
+        }
+
+        void unlock() {
+            if(this_thread_hierarchy_value!=hierarchy_value) {
+                throw std::logic_error(“mutex hierarchy violated”);
+            }
+            this_thread_hierarchy_value=previous_hierarchy_value;
+            internal_mutex.unlock();
+        }
+
+        bool try_lock() {
+            check_for_hierarchy_violation();
+            if(!internal_mutex.try_lock()) {
+                return false;
+            }
+            update_hierarchy_value();
+            return true;
+        }
+    private:
+        std::mutex internal_mutex;
+        unsigned long const hierarchy_value;
+        unsigned long previous_hierarchy_value;
+        static thread_local unsigned long this_thread_hierarchy_value;
+
+        void check_for_hierarchy_violation() {
+            if(this_thread_hierarchy_value <= hierarchy_value) {
+                throw std::logic_error(“mutex hierarchy violated”);
+            }
+        }
+
+        void update_hierarchy_value() {
+            previous_hierarchy_value=this_thread_hierarchy_value;
+            this_thread_hierarchy_value=hierarchy_value;
+        }
+};
+
+thread_local unsigned long hierarchical_mutex::this_thread_hierarchy_value(ULONG_MAX);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [hierarchical_mutex]: Implementación de `hierarchical_mutex`]
+
+La implementación de `hierarchical_mutex` usa una variable con el modificador `thread_local` para almacenar el valor de jerarquía actual del hilo. Este modificar permite acceder y almacenar determinados datos en la memoria local de cada hilo. Este valor es accesible por todas las instancias del mutex, pero tiene un valor distinto para cada hilo. Esto permite al código comprobar el comportamiento de cada hilo por separado, y el código de cada mutex puede comprobar si el hilo tiene permitido o no bloquear el mutex.
+
+La clave aquí es el uso del valor `thread_local` que representa el valor de jerarquía para el hilo actual, `this_thread_hierarchy_value`. Se inicializa al valor máximo `ULONG_MAX`, para que inicialmente pueda bloquear cualquier mutex. Puesto que está declarada como `thread_local`, cada hilo tiene su propia copia, por lo que el estado de esa variable en un hilo es completamente independiente del estado de la variable cuando se lee desde otro hilo.
+
+La primera vez que un hilo bloquea una instancia de un `hierarchical_mutex`, el valor de `this_thread_hierarchy_value` es `ULONG_MAX`. El cual siempre es más grande que cualquier otro valor, de tal manera que la verificación en `check_for_hierarchy_violation` pasa. Una vez hecho esto, `lock()` delega en el mutex interno para el bloqueo. Una vez el bloqueo se ha realizado correctamente, se puede actualizar el valor de jerarquía.
+
+Si ahora se bloquea otro `hierarchical_mutex` mientras se mantiene el bloqueo en el primero, el valor de `this_thread_hierarchy_value`refleja el valor de jerarquía del primer mutex. El valor de jerarquía de este segundo mutex ahora debe ser menos del mutex ya bloqueado para que `check_for_hierarchy_violation` pase.
+
+Ahora, es importante guardar el valor anterior de la jerarquía del hilo actual para poder restaurarlo en `unlock()`, de otra manera, nunca se podría bloquear un mutex con un valor más alto otra vez, incluso aunque el hilo no tuviera ningún bloqueo activo. Puesto que se almacena este valor de jerarquía previo solo cuando se mantiene el bloqueo sobre `internal_mutex`, y se restaura antes de desbloquear este mutex, se puede almacenar en el propio `hierarchical_mutex`, puesto que está protegido por el bloqueo del mutex interno. Para evitar que la jerarquía pueda confundirse por el desbloqueo fuera de orden, se lanza una excepción si el mutes que se está desbloqueando no es el que se ha bloqueado más recientemente. Se pueden implementar otros mecanismos, pero este es el más simple.
+
+La función `try_block()` funciona igual que `lock()`, excepto que si la llamada a `try_lock()` sobre el mutex interno falla, entonces no se adquiere el bloqueo, y no se actualiza el valor de jerarquía, y se devuelve `false` en lugar de `true`.
+
+Pese a que la detección se realiza en tiempo de ejecución, no es dependiente de la temporalización, no hay que esperar a que sucedan raras condiciones de carrera que puedan causar que se muestren los deadlock. Además, el proceso de diseño que se necesita para dividir la aplicación y los mutexes de está manera puede ayudar a eliminar muchas causas posibles de deadlocks antes de incluso escribirlos. Puede servir como ejercicio de diseño aunque no se vaya tan lejos como para escribir las comprobaciones en tiempo de ejecución.
+
+### Extender estas reglas más allá de los bloqueos
+
+Como se ha comentado antes, los deadlocks no solo ocurren con los bloqueos, pueden ocurrir con cualquier construcción de sincronización que pueda llevar a un ciclo de espera. Por tanto, es útil extender estas reglas para cubrir también estos casos. Por ejemplo, tal como se debería evitar adquirir bloqueos anidados en lo posible, también es mala idea esperar a un hilo mientras se mantiene un bloqueo, puesto que el hilo puede necesitar adquirir ese bloqueo para progresar. De igual manera, si se va a esperar a que un hilo finalice, puede ser útil identificar la jerarquía del hilo, para que el hilo espere solo a hilos con menor jerarquía. Una manera simple de hacer esto es asegurar que a los hilos se les haga `join()` en la misma función que los arrancó.
+
+## Bloqueos flexibles con *std::unique_lock*
+
+Una vez diseñado el código para evitar deadlocks, `std::lock` y `std::lock_guard` cubren la mayoría de los casos para bloqueos simples, pero a veces se requiere mayor flexibilidad. Para estos casos, la librería standard de C++ ofrece el template `std::unique_lock`. Al igual que `std::lock_guard`, es una clase template parametrizada sobre el tipo mutex, también tiene un estilo *RAII* pero con algo más de flexibilidad.
+
+Esta flexibilidad la adquiere relajando los invariantes, una instancia de `std::unique_lock` no siempre tiene la propiedad del mutex con el cual está asociada. En primer lugar, igual que se puede pasar `std::adopt_lock` como segundo argumento al constructor para hacer que el objeto gestione el bloqueo del mutex, también se puede pasar `std::defer_lock` como segundo argumento para indicar que el mutex debe mantenerse desbloqueado en la construcción del objeto. El bloqueo se puede adquirir más tarde llamando a `lock()` en el objeto `std::unique_lock` (no sobre el mutex) o pasándole el objeto `std::unique_lock` a `std::lock()`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class some_big_object;
+
+void swap(some_big_object& lhs,some_big_object& rhs);
+
+class X {
+  private:
+    some_big_object some_detail;
+    std::mutex m;
+  public:
+    X(some_big_object const& sd):some_detail(sd){}
+
+    friend void swap(X& lhs, X& rhs) {
+        if(&lhs==&rhs)
+            return;
+        std::unique_lock<std::mutex> lock_a(lhs.m,std::defer_lock);
+        std::unique_lock<std::mutex> lock_b(rhs.m,std::defer_lock);
+        std::lock(lock_a,lock_b);
+        swap(lhs.some_detail,rhs.some_detail);
+    }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [unique_lock]: Uso de `std::unique_lock` en una operación de swap]
+
+La operación de swap vista en Listing [lock] se puede escribir usando `std::unique_lock` y `std::defer_lock` en lugar de `std::lock_guard` y `std::adopt_lock`. El código tiene las mismas lineas y es equivalente, excepto por un pequeño detalle, `std::unique_lock` ocupa más espacio y es un poco más lento que `std::lock_guard`. La flexibilidad de permitir que una instancia de `std::unique_lock` no obtenga la propiedad del mutex tiene un precio, la información tiene que ser almacenada y actualizada.
+
+Los objetos `std::unique_lock` se pueden pasar a `std::lock()` porque tienen las tres funciones miembro `lock()`, `unlock()` y `try_lock()`. Estas redirigen el trabajo a los miembros del mismo nombre del mutex subyacente, y además actualizan un flag dentro de la instancia de `std::unique_lock` para indicar si la propiedad del mutex la tiene la instancia. Este flag es necesario para asegurar que `unlock()` se llama correctamente en el destructor. Si la instancia tiene la propiedad del mutex, entonces el destructor debe llamar a `unlock()`, pero si la instancia no la tiene, entonces el destructor no debe llamar a `unlock()`. Este flag se puede consultar llamando al miembro `owns_lock()`. A menos que se vaya a trabajar con la transferencia de la propiedad de los bloqueos es mejor trabajar con `std::scoped_lock`.
+
+Este flag hay que almacenarlo en algún sitio, por lo que el tamaño de un objeto `std::unique_lock` es más grande que un objeto `std::lock_guard`, y hay también una pequeña penalización de rendimiento puesto que hay que actualizar o comprobar este flag. De todas maneras, muchas veces es suficiente con un `std::lock_guard`, y a menos que se necesite esta flexibilidad extra no vale la pena usar `std::unique_lock`.
+
+## Transfiriendo la propiedad de mutexes
+
+Puesto que las instancias de `std::unique_lock` no tienen porque mantener la propiedad de sus mutexes asociados, la propiedad de un mutex puede ser transferida entre instancias moviendo dichas instancias. En algunos casos la transferencia es automática, como cuando se devuelve una instancia desde una función, y en otros casos hay que hacerlo explícitamente llamando a `std::move()`. Fundamentalmente esto depende de si el origen es un *lvalue* (una variable real o la referencia a una) o un *rvalue* (algún tipo de valor temporal). La transferencia de la propiedad es automática si el origen es un *rvalue* y se debe hacer de manera explícita para un *lvalue* para evitar la transferencia de propiedad accidental. `std::unique_lock` es un ejemplo de un tipo que se puede mover pero no se puede copiar.
+
+Un uso posible es permitir a una función bloquear un mutex y transferir la propiedad de ese bloqueo a quien ha llamado a la función, para que este realice operaciones adicionales bajo la protección del mismo bloqueo.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::unique_lock<std::mutex> get_lock() {
+    extern std::mutex some_mutex;
+    std::unique_lock<std::mutex> lk(some_mutex);
+    prepare_data();
+    return lk;
+}
+
+void process_data() {
+    std::unique_lock<std::mutex> lk(get_lock());
+    do_something();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [transfer]: Transferencia de un mutex]
+
+La función `get_lock()` bloquea el mutex, prepara los datos y entonces devuelve el bloqueo a quien le ha llamado. Puesto que `lk` es una variable automática declarada dentro de la función, se puede devolver directamente, sin la necesidad de llamar a `std::move()`, el compilador se encarga de esa llamada al constructor de movimiento. La función `process_data()` entonces puede transferir la propiedad directamente en su propia instancia de `std::unique_lock`, y la llamada a `do_something()` puede confiar en tener los datos preparados correctamente sin que otro hilo haya podido alterar los datos entre tanto.
+
+Normalmente este tipo de patrón se usaría donde un mutex para ser bloqueado es dependiente del estado actual del programa o en un argumento pasado a la función que devuelve el objeto `std::unique_lock`. Uno de estos usos es cuando el bloqueo no se devuelve directamente pero es un miembro de un clase de enlace usada para asegurar acceso bloqueado a algún tipo de datos protegidos. En este caso, todo el acceso a los datos se hace a través de esta clase de enlace (llamando a una función como `get_lock()`), la cual adquiere el bloqueo. Entonces se puede acceder a los datos a través de las funciones miembro de clase de enlace. Cuando se acaba, se destruye el objeto de enlace, el cual libera el bloqueo y permite a otros hilos acceder a los datos protegidos. Este objeto de enlace se puede mover (para que pueda ser devuelto por una función), en este caso, el miembro con el objeto del bloqueo también hay que moverlo.
+
+La flexibilidad de `std::unique_lock` también permite que estas instancias liberen sus bloqueos antes de ser destruidas. Se puede hacer esto con la función miembro `unlock()`, como se hace con un mutex. `std::unique_lock` soporta el mismo conjunto básico de funciones para bloquear y desbloquear como un mutex normal, de manera que puede ser usado con funciones genéricas como `std::lock`. La capacidad para liberar un bloqueo antes de que la instancia de `std::unique_lock` se destruya implica que se puede liberar opcionalmente en alguna rama del código si evidente que el bloqueo ya no se necesita. Esto puede ser importante para el rendimiento de la aplicación, mantener un bloqueo más tiempo del necesario puede causar una bajada de rendimiento, puesto que otros hilos pueden estar esperando a ese bloqueo más tiempo de lo necesario.
+
+## Bloqueando a la granularidad apropiada
+
+En secciones anteriores ya se ha tratado el tema de la granularidad de un bloqueo, que al final, no es más que un término impreciso para describir la cantidad de datos protegida por un bloqueo único. Un bloqueo de grano fino protege una pequeña cantidad de datos, mientras que uno de grano grueso protege una cantidad grande de datos. No solo es importante elegir una granularidad suficientemente gruesa para el bloqueo para asegurar que los datos necesarios son protegidos, también es importante asegurar que un bloqueo se mantiene solo durante las operaciones que realmente lo necesitan. Si varios hilos están esperando al mismo recurso, si un hilo mantiene el bloqueo más tiempo del necesario incrementará el tiempo total de espera. Siempre que sea posible, hay que bloquear un mutex solo mientras se accede a los datos compartidos, hay que intentar realizar cualquier procesamiento fuera del bloqueo. En particular, no hay que realizar actividades que consuman mucho tiempo, como E/S, mientras se mantiene un bloqueo. El trabajo con ficheros de Entrada/Salida es usualmente cientos o miles de veces más lento que leer o escribir el mismo volumen de datos de la memoria. A menos que el bloqueo esté diseñado para proteger el acceso al fichero, realizar operaciones de E/S mientras se mantiene el bloqueo retrasará otros hilos innecesariamente, eliminando potencialmente cualquier ganancia de rendimiento por el uso de múltiples hilos.
+
+`std::unique_lock` funciona bien en esta situación, puesto que se puede llamar a `unlock()` cuando el código ya no necesite acceder a los datos compartidos y luego llamar a `lock()` otra vez si se vuelve a necesitar acceder a estos datos más tarde.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void get_and_process_data() {
+    std::unique_lock<std::mutex> my_lock(the_mutex);
+    some_class data_to_process = get_next_data_chunk();
+    my_lock.unlock();
+    result_type result = process(data_to_process);
+    my_lock.lock();
+    write_result(data_to_process,result);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [unique_lock2]: Bloquear y desbloquear con `unique_lock`]
+
+No se necesita mantener el mutex bloqueado durante la llamada a `process()`, así que se desbloquea manualmente antes de esa llamada, y se vuelve a bloquear de nuevo tras ella.
+
+Es obvio que si un solo mutex protege una estructura de datos completa, no solo es probable que haya más contención por el bloqueo, sino que también disminuye el potencial para reducir el tiempo que se mantiene el bloqueo. Más pasos de la operación requerirán un bloqueo sobre el mismo mutex, por lo que este deberá mantenerse durante más tiempo. Este doble coste también supone un doble incentivo para avanzar hacia un bloqueo más granular siempre que sea posible.
+
+Bloquear con la granularidad correcta no tiene ver solo con la cantidad de datos bloqueados, si no también sobre cuando tiempo el bloqueo se mantiene y que operaciones se realizan mientras el bloqueo se mantiene. En general, un bloqueo debería mantenerse el tiempo mínimo posible necesario para realizar las operaciones requeridas. Esto también implica que operaciones que conllevan un coste temporal alto, como adquirir otro bloqueo (aún sabiendo que no habrá un deadlock) o esperar a una operación de E/S no deberían realizarse mientras se mantiene un bloqueo, a menos que sea estrictamente necesario.
+
+En Listing [unique_lock] la operación que necesitaba bloquear los dos mutexes era una operación de intercambio o swap, que obviamente necesita acceso concurrente a ambos objetos. En lugar de eso, si se estuviera intentando comparar un miembro que sea de un tipo de datos simple, como un entero. Los enteros son baratos de copiar, así que se podrían copiar fácilmente los datos para cada objeto que se compara mientras se mantiene el bloqueo para ese objeto y luego se comparan los valores copiados fuera del bloqueo. Esto significa que se mantiene el bloqueo en cada mutex la mínima cantidad de tiempo, y también que no se mantiene un bloqueo mientras se adquiere el otro.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class Y {
+    private:
+        int some_detail;
+        mutable std::mutex m;
+
+        int get_detail() const {
+            std::lock_guard<std::mutex> lock_a(m);
+            return some_detail;
+        }
+
+    public:
+        Y(int sd):some_detail(sd){}
+
+        friend bool operator==(Y const& lhs, Y const& rhs) {
+            if(&lhs==&rhs)
+                return true;
+            int const lhs_value=lhs.get_detail();
+            int const rhs_value=rhs.get_detail();
+            return lhs_value==rhs_value;
+        }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [compare]: Bloquear al acceder a los datos]
+
+En este caso, en el operador de comparación, primero se obtienen los valores a ser comparados usando la función miembro `get_detail()`. Esta función devuelve los datos mientras los protege con un bloqueo. El operador de comparación entonces compara los valores obtenidos previamente. Sin embargo, este modo además de reducir los periodos de bloqueo para que solo un bloqueo se mantenga en el tiempo a la vez (eliminando de paso la posibilidad de un deadlock), también ha cambiado sutilmente la semántica de la operación respecto a mantener los dos bloqueos a la vez. En Listing [compare] si el operador de comparación devuelve `true`, significa que el valor de `lhs.some_detail` en un punto del tiempo es igual a `rhs.some_detail` en otro punto del tiempo. Los dos valores podrían haber sido cambiados de alguna manera entre las dos lecturas, se podrían incluso haber intercambiado entre esas dos lecturas por otro hilo, haciendo que la comparación dejara de tener sentido. Este operador de comparación podría devolver `true` indicando que ambos valores eran iguales, aunque cabe la posibilidad que nunca han sido iguales en ningún instante del tiempo. Por lo cual, es importante ir con cuidado al hacer estos cambios y revisar que la semántica de la operación no ha cambiado de alguna manera problemática. Si no se mantienen los bloqueos durante toda la longitud de la operación, se está expuesto a condiciones de carrera.
+
+Algunas veces, no hay un nivel de granularidad apropiado, porque no todos los accesos a la estructura de datos necesitan el mismo nivel de protección. En este caso, quizás sea apropiado usar otro mecanismo alternativo, en lugar de un `std::mutex`.
+
+# Otras formas de proteger datos compartidos
+
+Pese a que son el mecanismo más usado, los mutexes tienen alternativas a la hora de proteger datos compartidos, que en determinados contextos resultan más apropiadas. Un caso particularmente extremo, aunque bastante común, es el caso donde los datos compartidos necesitan protección del acceso concurrente solo mientras se están inicializando, pero tras ese paso, ya no es necesaria ninguna sincronización explícita. Esto puede ser porque los datos sean de solo lectura una vez creados, así que no hay posibles problemas de sincronización, o puede ser porque la protección necesaria se realice de manera implícita como parte de las operaciones sobre los datos. En cualquier caso, bloquear un mutex una vex los datos se han inicializado, simplemente para proteger los datos durante la inicialización, es innecesario y puede afectar negativamente al rendimiento.
+
+## Proteger datos compartidos durante la inicialización
+
+Se tiene un recurso compartido, que es tan caro de construir que se hace solo si es estrictamente necesario, puede ser abrir una conexión a una base de datos o asignar mucha memoria. La inicialización perezosa (*lazy initialization*) es muy común en código mono hilado, cada operación que necesita el recurso primero verifica si el recurso se encuentra inicializado y si no es así, lo inicializa en ese momento.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::shared_ptr<some_resource> resource_ptr;
+
+void foo() {
+    if(!resource_ptr) {
+        resource_ptr.reset(new some_resource);
+    }
+    resource_ptr->do_something();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [init_rsrc]: Inicializar recurso antes de usarlo]
+
+Si el recurso compartido en sí mismo es seguro para usarlo en código concurrente, la única parte que necesita protección al convertir esto a código multi hilo es la inicialización.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::shared_ptr<some_resource> resource_ptr;
+std::mutex resource_mutex;
+
+void foo() {
+    std::unique_lock<std::mutex> lk(resource_mutex);
+    if(!resource_ptr) {
+        resource_ptr.reset(new some_resource);
+    }
+    lk.unlock();
+    resource_ptr->do_something();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [init_rsrc2]: Inicializar recurso antes de usarlo protegiendo con un mutex]
+
+Con una solución simple Listing [init_rsrc2] se crea un nuevo problema, se causa una serialización de todos los hilos que usan el recurso. Ya que cada hilo debe esperar en el mutex para si quiera verificar si el recurso ya se ha inicializado. Este tipo de código es muy común, y la serialización de los hilos lo suficientemente problemática que se han planteado muchas opciones, incluyendo el patrón de diseño *double-checked locking*, el puntero se lee primero sin adquirir el mutex, y el mutex se adquiere solo si el puntero es `NULL`. Entonces se verifica el puntero otra vez, una vez se ha bloqueado el mutex (de ahí el nombre de *double-checked*) por si algún otro hilo ha hecho la inicialización entre la primera verificación y que este hilo haya cogido el bloqueo.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void foo() {
+    if(!resource_ptr) {
+        std::lock_guard<std::mutex> lk(resource_mutex);
+        if(!resource_ptr) {
+            resource_ptr.reset(new some_resource);
+        }
+    }
+    resource_ptr->do_something();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [init_rsrc3]: Doble verificación del puntero]
+
+Por desgracia, este patrón es tristemente célebre por una razón, tiene el potencial de peligrosas condiciones de carrera. La lectura fuera del bloqueo no está sincronizada con la escritura hecha por otro hilo dentro del bloqueo. Esto crea una condición de carrera que no solo afecta al puntero en sí mismo, si no también al objeto al que apunta, incluso si un hilo ve el puntero escrito por otro hilo, puede que no vea la instancia recientemente creada de `some_resource`, haciendo que la llamada a `so_something()` opere sobre valores incorrectos. Este es un ejemplo del tipo de condición de carrera definida como una *carrera de datos* (*data race*) por el standard de C++ y que acaba en *undefined behavior*. Y por tanto, algo a evitar.
+
+Para solucionar este tipo de problemas la librería standard de C++ tiene dos tipos nuevos para manejarlos, `std::once_flag` y `std::call_once`. En lugar de bloquear un mutex y verificar el puntero de manera explícita, cada hilo puede usar `std::call_once`, con la seguridad de que el puntero habrá sido inicializado por algún hilo (de forma correcta) para cuando `std::call_once` devuelva un valor. Los datos de sincronización necesarios se almacenan en la instancia de `std::once_flag`, cada instancia de `std::once_flag` corresponde a una inicialización distinta. El uso de `std::call_once` suele tener un coste menor que usar un mutex explícitamente, especialmente cuando la inicialización ya se ha hecho, así que debería usarse cuando encaje en esta funcionalidad.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::shared_ptr<some_resource> resource_ptr;
+std::once_flag resource_flag;
+
+void init_resource() {
+    resource_ptr.reset(new some_resource);
+}
+
+void foo() {
+    std::call_once(resource_flag,init_resource);
+    resource_ptr->do_something();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [init_rsrc4]: Inicialización segura]
+
+En este caso, la inicialización se hace llamando a una función, pero se podría haber reemplazado fácilmente por la instancia de una clase con una llamada al operador (). Como la mayoría de funciones en la librería standard que reciben funciones como argumentos, `std::call_once` funciona con cualquier tipo de función u objeto que se pueda llamar.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class X {
+    private:
+        connection_info connection_details;
+        connection_handle connection;
+        std::once_flag connection_init_flag;
+
+        void open_connection() {
+            connection=connection_manager.open(connection_details);
+        }
+
+    public:
+        X(connection_info const& connection_details_):
+            connection_details(connection_details_) {}
+
+        void send_data(data_packet const& data) {
+            std::call_once(connection_init_flag, &X::open_connection, this);
+            connection.send_data(data);
+        }
+
+        data_packet receive_data() {
+            std::call_once(connection_init_flag, &X::open_connection, this);
+            return connection.receive_data();
+        }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [init_rsrc5]: Inicialización segura usando una clase]
+
+Se puede fácilmente encapsular este sistema dentro de una clase. En este caso, la inicialización se realiza o bien en la primera llamada a `send_data()` o `receive_data()`. El uso de la función miembro privada `open_connection()` para inicializar los datos necesita recibir el puntero `this`. Como en otras funciones de la librería standard que aceptan objetos que se pueden llamar, como los constructores de `std::thread` o `std::bind`, esto se realiza pasando un argumento adicional a `std::call_once`.
+
+Tal como pasa como con `std::mutex`, las instancias de `std::once_flag` no se pueden copiar o mover, por lo que si se usan como miembro de clase, habría que escribir estas funciones miembro especiales si se necesitan.
+
+Un escenario donde existe una potencial condición de carrera durante la inicialización es el de una variable local declarada como `static`. La inicialización de una variable de ese tipo se define que ocurre la primera vez que el control pasa sobre su declaración, en un contexto con múltiples hilos llamando a esa función, esto quiere decir que hay una posible condición de carrera en una primera definición. En C++11 este problema no existe, puesto que la inicialización se define que sucede en exactamente solo un hilo, y ningún otro hilo seguirá hasta que la inicialización se complete, así que la única condición de carrera es para ver qué hilo realiza dicha inicialización, pero nada más problemático. Esto se puede usar como alternativa a `std::call_once` en aquellos casos donde se necesite una única instancia global.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class my_class;
+
+my_class& get_my_class_instance() {
+    static my_class instance;
+    return instance;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [init_rsrc6]: Inicialización segura con `static`]
+
+Varios hilos pueden llamar a `get_my_class_instance()` de manera segura sin tener que preocuparse de condiciones de carrera en esta inicialización.
+
+## Protegiendo estructuras de datos que casi no se actualizan
+
+Proteger los datos solo durante la inicialización es un caso especial de uno más general, aquel de las estructuras de datos que se actualizan raramente. La mayor parte del tiempo, estas estructuras de datos son de solo lectura, y por tanto, pueden ser leídas por muchos hilos de manera concurrente sin problemas, pero en ocasiones esta estructura de datos necesita alguna actualización.
+
+Por ejemplo, una tabla que se use para almacenar una cache de registros de DNS para resolver nombres de dominio a sus respectivas direcciones IP. Normalmente, un registro determinado de un DNS se mantendrá sin cambios por un largo periodo de tiempo, incluso a veces, por años. A pesar de que se puedan añadir nuevos registros a la tabla de vez en cuando, en esas ocasiones donde un usuario visita una web nueva, estos datos permanecerán mayormente inalterados durante toda su vida. Es importante verificar la validez de esos registros en la cache de manera periódica, pero esto supone realizar una actualización solo si los detalles han cambiado.
+
+Pese a que estas actualizaciones sean raras, pueden ocurrir, y si a esta cache acceden varios hilos, tiene que ser protegida adecuadamente durante las actualizaciones para asegurar que ninguno de los hilos leyendo la cache vean una estructura de datos rota.
+
+El mecanismo ideal sería implementar una estructura de datos avanzada, como una libre de bloqueos *lock-free*. Pero por simplificar, esta actualización necesita que el hilo que la está realizando tenga acceso exclusivo a la estructura de datos hasta que ha acabado la operación. Una vez el cambio ha acabado, la estructura de datos es otra vez segura para que varios hilos accedan de manera concurrente. Usar un mutex para proteger los datos es demasiado pesimista, puesto que eliminaría cualquier posible concurrencia en la lectura de los datos cuando no se está realizando ninguna modificación. Se necesita un nuevo tipo de mutex, llamado *reader-writer*, que permita dos tipos de uso distinto, acceso exclusivo por un solo hilo escritor, y acceso concurrente para varios hilos lectores.
+
+En C++17 aparecen dos mutexes de este tipo, `std::shared_mutex` y `std::shared_timed_mutex`. La diferencia entre ambos es que el segundo soporta operaciones adicionales. El rendimiento de usar este tipo de mutex depende mucho del número de núcleos involucrados y las cargas de trabajo relativas de los hilos lectores y escritores. Por tanto, es importante medir el rendimiento del código en el sistema de destino para asegurar que hay un beneficio claro pese a añadir bastante complejidad.
+
+En lugar de usar una instancia de `std::mutex` para la sincronización, se usa una de `std::shared_mutex`. Para las operaciones de actualización se puede usar `std::lock_guard<std::shared_mutex>` y `std::unique_lock<std::shared_mutex>`, en lugar de las especializaciones correspondientes de `std::mutex`. Esto asegura el acceso exclusivo, tal como lo hace un `std::mutex`. Los hilos que no necesitan actualizar la estructura de datos, en su lugar pueden usar `std::shared_lock<std::shared_mutex>` para obtener el acceso compartido. Esta clase templatizada se usa igual que `std::unique_lock`, pero varios hilos pueden tener un bloqueo compartido en el mismo `std::shared_mutex` a la vez. La única limitación es que si un hilo mantiene bloqueado un mutex compartido, un hilo que quiera adquirir un bloqueo exclusivo se esperará hasta que todos los demás hilos hayan liberado sus bloqueos, y de igual manera, si algún hilo mantiene un bloqueo exclusivo, ningún otro hilo puede adquirir un bloqueo compartido o exclusivo hasta que el primer hilo lo libere.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <map>
+#include <string>
+#include <mutex>
+#include <shared_mutex>
+
+class dns_entry;
+
+class dns_cache {
+    private:
+        std::map<std::string, dns_entry> entries;
+        mutable std::shared_mutex entry_mutex;
+
+    public:
+        dns_entry find_entry(std::string const& domain) const {
+            std::shared_lock<std::shared_mutex> lk(entry_mutex);
+            std::map<std::string,dns_entry>::const_iterator const it =
+                entries.find(domain);
+            return (it==entries.end()) ? dns_entry() : it->second;
+        }
+
+        void update_or_add_entry(std::string const& domain,
+        dns_entry const& dns_details) {
+            std::lock_guard<std::shared_mutex> lk(entry_mutex);
+            entries[domain]=dns_details;
+        }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [shared_mutex]: Uso de un `shared mutex`]
+
+En Listing [shared_mutex] se describe una posible implementación de un servidor DNS como el comentado, se usa un `std::map` para almacenar los datos en cache, y se protegen dichos datos usando `std::shared_mutex`. El método `find_entry()` usa una instancia de `std::shared_lock<>` para protegerse del acceso compartido de solo lectura, por tanto, varios hilos pueden llamar a `find_entry()` de manera simultanea sin problemas. Por otro lado, `update_or_add_entry()` usa una instancia de `std::lock_guard<>` para conseguir acceso exclusivo mientras se actualiza la tabla, no solo se previene que otros hilos realicen actualizaciones con una llamada a `update_or_add_entry()`, si no que cualquier hilo que llame a `find_entry()` también se bloquean.
+
+## Bloqueos recursivos
+
+Con `std::mutex` es un error si un hilo intenta bloquear un mutex que ya tiene, e intentar hacerlo puede llevar a *undefined behavior*. Pero en ciertas circunstancias puede ser interesante que un hilo vuelva a bloquear el mismo mutex varias veces si haberlo liberado antes. Para esto, en la librería standard se encuentra el `std::recursive_mutex`. Funciona como un `std::mutex` salvo que se puede bloquear varias veces la misma instancia desde el mismo hilo. Hay que liberar todos los bloqueos antes de que el mutex pueda ser bloqueado por otro hilo, así que si se llama a `lock()` tres veces, hay que llamar a `unlock()` tres veces también.  El uso correcto de `std::lock_guard<std::recursive_mutex>` y `std::unique_lock<std::recursive_mutex>` maneja esto.
+
+La mayor parte de la veces, si se considera el uso de un mutex recursivo, es mejor pensar en cambiar el diseño del código. Un uso común de los mutexes recursivos es cuando una clase se diseña para ser accesible desde varios hilos concurrentemente, así que tiene un mutex protegiendo a los datos miembros. Cada función miembro pública bloquea el mutex, hace el trabajo y libera el mutex. Pero a veces, algunas de estas funciones miembro llaman a otras para hacer su trabajo. En este caso, la segunda función miembro también intentará bloquear el mutex, llevando a *undefined behavior*. La solución rápida y sucia es usar un mutex recursivo. Esto permite bloquear el mutex en la segunda función miembro.
+
+Pero este uso no está aconsejado puesto que puede llevar a un mal diseño de estas clases. En particular, los invariantes de estas clases suelen estar rotos mientras el bloqueo se mantiene, lo que significa que la segunda función miembro tiene que funcionar incluso cuando se la llama con invariantes rotos. Suele ser mejor idea extraer una nueva función miembro privada que se llame desde ambas funciones miembro, que no bloquee el mutex (espera que ya esté bloqueado). Entonces ya se puede diseñar esta función pensando en las circunstancias bajo las que se puede llamar y el estado de los datos en ese momento.
+
+<link rel="stylesheet" href="res/md/viu.css">
+<style class="fallback">body{visibility:hidden}</style><script>markdeepOptions={tocStyle:'long'};</script>
+<!-- Markdeep: --><script src="res/md/markdeep.min.js?" charset="utf-8"></script>

@@ -1,0 +1,726 @@
+<meta charset="utf-8">
+**22GIAR - 003 - Herramientas de Sincronización**
+    <small>©2026 VIU - 22GIAR Programación Concurrente, Distribuida y Paralela - Iván Fuertes</small>
+
+# Introducción
+
+En un entorno real se ejecutan simultáneamente muchos hilos de manera concurrente o paralela, estos hilos a menudo comparten partes de la memoria, con sus datos. Estas estructuras de datos se están actualizando constantemente por estos mismos hilos, y se pueden producir fácilmente condiciones de carrera. Si no existe un control sobre el acceso a estos datos, es muy posible llegar a valores de datos corruptos que puedan afectar a la correcta ejecución del programa.
+
+La sincronización de tareas supone usar herramientas que controlen el acceso a los datos compartidos para evitar condiciones de carrera. Pero aún así, estas herramientas deben ser usadas con cautela, puesto que su uso incorrecto puede acabar en un rendimiento general muy pobre, incluyendo interbloqueos o *deadlocks*. En cualquier caso, es importante mantener la consistencias de los datos, a través de mecanismos para asegurar la ejecución de tareas ordenadamente compartiendo un espacio de direcciones lógico.
+
+# Condiciones de carrera
+
+El sistema operativo tiene un componente llamado *CPU scheduler* o planificador, que decide a través de sus propios algoritmos que tarea entra o sale de ejecución en alguno de los núcleos físicos. Es decir, tiene control absoluto sobre cuando o cuanto tiempo una tarea está en ejecución. Y el programador no tiene ningún acceso o control acerca de estas decisiones, las toma el propio sistema operativo basándose en sus propios parámetros, como la carga de procesos, tiempos de espera, gestión de colas,...
+
+Las tareas se pueden ejecutar de manera concurrente o paralela, y el planificador de la CPU cambia rápidamente entre tareas para proporcionar la ejecución concurrente. Esto supone que una tarea puede haber completado solo parte de su ejecución antes de que otra tarea tome su lugar en el procesador. De hecho, una tarea puede ser interrumpida en cualquier punto dentro de su flujo de instrucciones, y el núcleo de procesamiento asignarse a ejecutar instrucciones de otro proceso. Incluso, en un contexto de paralelismo real por hardware, como se ha visto, pueden existir dos o más secuencias de instrucciones (representando distintas tareas) ejecutándose de manera simultanea en distintos núcleos de procesamiento.
+
+Anteriormente, se ha visto el problema *productor-consumidor* con un buffer de capacidad fija, en el contexto de varias tareas que se ejecutan de manera asíncrona y paralela y compartiendo los datos.
+
+![Figure [res/001_005]: Productor-Consumidor con buffer](res/001_005.png)
+
+Se tiene un buffer con capacidad para n elementos, en este caso se construye como un vector. Se podrían usar los siguientes atributos:
+
+- *in*, índice del vector en el cual un proceso productor insertaría el próximo elemento en el buffer, *in = 5*
+- *out*, índice del vector del cual un proceso consumidor va a extraer el próximo elemento del buffer, *out = 0*
+- *size*, tamaño del buffer, *size = 7*
+- *n_elems*, número actual de elementos en el vector, *n_elems = 5*
+- *buffer*, el vector con los elementos
+
+Un posible código para las tareas productoras de objetos podría ser el siguiente.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+while (true) {
+    // produce an item in next_produced
+
+    while (n_elems == size) {
+        // do nothing, wait for an empty space
+    }
+
+    buffer[in] = next_produced;
+    in = (in + 1) % size;
+    n_elems++;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [producer]: Código para la tarea productora de elementos]
+
+Y para las tareas que consumen estos elementos.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+while (true) {
+    while (n_elems == 0) {
+        // do nothing, wait for an element in the buffer
+    }
+
+    next_consumed = buffer[out];
+    out = (out + 1) % size;
+    n_elems--;
+
+    // consume the item in next_consumed
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [consumer]: Código para la tarea consumidora de elementos]
+
+Pese a que estas dos rutinas son correctas de manera separada, pueden no funcionar correctamente cuando se ejecutan de manera concurrente. Por ejemplo, en un momento en el cual la variable `n_elems` sea igual a 5, si dos procesos productor y consumidor se ejecutan en el mismo instante, pueden ejecutar la sentencia `n_elems++` y `n_elems--` a la vez, y en función de como se intercalen las instrucciones acabar esa variable, con un valor de 4, 5 o 6. Cuando el único valor correcto sería 5, si se ejecutaran de manera separada.
+
+La sentencia `n_elems++` internamente puede ser implementada en lenguaje máquina de la siguiente manera.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+register1 = n_elems
+register1 = register1 + 1
+n_elems = register1
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [n_elems++]: Postincremento en ensamblador]
+
+Usando uno de los registros que tiene la CPU disponibles, en este caso, el registro 1. De manera similar, la sentencia `n_elems--` se puede implementar así.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+register2 = n_elems
+register2 = register2 - 1
+n_elems = register2
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [n_elems--]: Postderemento en ensamblador]
+
+Donde ahora se puede estar usando otro registro distinto de la CPU, el registro 2. Pero puede que incluso se use el mismo registro físico para las dos operaciones. La ejecución concurrente de `n_elems++` y `n_elems--` es equivalente a una ejecución secuencial en la cual las sentencias de bajo nivel se intercalan en un orden arbitrario (pero el orden dentro de cada sentencia a alto nivel se preserva).
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+T0 : producer    execute    register1 = n_elems          {register1 = 5}
+T1 : producer    execute    register1 = register1 + 1    {register1 = 6}
+T2 : consumer    execute    register2 = n_elems          {register2 = 5}
+T3 : consumer    execute    register2 = register2 - 1    {register2 = 4}
+T4 : producer    execute    n_elems = register1          {n_elems = 6}
+T5 : consumer    execute    n_elems = register2          {n_elems = 4}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [interleave]: Posible orden de ejecución de los dos hilos]
+
+Una posible ejecución puede ser esta Listing [interleave], en la cual se ha llegado al estado incorrecto de tener la variable `n_elems == 4`, indicando que en nuestro *buffer* hay 4 elementos válidos, cuando hay 5 realmente. Habían 5 inicialmente, se ha producido 1 y se ha consumido 1. Si se invierte el orden de las sentencias *T4* y *T5*, se hubiera llegado a otro resultado incorrecto, `n_elems == 6`.
+
+Se ha llegado a este estado inválido porque se ha permitido a ambas tareas manipular la variable `n_elems` de manera concurrente. Una situación como esta, donde varias tareas acceden y manipulan los mismos datos de manera concurrente y el resultado de la ejecución depende del orden particular en el cual tiene lugar el acceso a los datos, se llama condición de carrera. En este caso concreto, para protegerse de la condición de carrera, hay que garantizar que solo un proceso a la vez puede manipular la variable `n_elems`. Para garantizar esto, hay que sincronizar a las tareas de alguna manera.
+
+## Sección crítica
+
+Se tiene un sistema con *n* tareas, *{T0, T1, ..., Tn-1}*. Cada tarea tiene un segmento de código, llamado sección crítica, en la cual la tarea puede estar accediendo y modificando datos que están compartidos con al menos una de las otras tareas. La característica principal de este sistema es que, cuando una tarea está ejecutando su sección crítica, ninguna otra tarea tiene permitido ejecutar su sección crítica. Es decir, no habrán dos tareas ejecutando su sección crítica al mismo tiempo. El problema es diseñar un protocolo que las tareas puedan usar para sincronizar su actividad y compartir datos de manera cooperativa. Cada tarea debe solicitar permiso para entrar en su sección crítica. La sección de código que implementa esta petición será la *sección de entrada*, y a la sección crítica seguirá la *sección de salida*. El resto de código podríamos decir que es la *sección restante*.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+while (true) {
+    entry_section
+        critical section
+    exit_section
+
+    remainder_section
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [critical_structure]: Estructura general de una tarea]
+
+Cualquier solución al problema de la sección crítica debe satisfacer tres requisitos:
+
+1. Exclusión mutua, si la tarea *Ti* está ejecutando su sección crítica, entonces ninguna otra tarea puede estar ejecutando sus secciones críticas.
+2. Progreso, si no hay ninguna tarea ejecutando su sección crítica y algunas tareas quieren entrar en su sección crítica, entonces solo una de esas tareas que no están ejecutando su sección restante pueden participar de la decisión de cual entrará en la sección crítica a continuación, y esta selección no se puede postponer indefinidamente.
+3. Espera limitada, existe un límite en el número de veces que a otras tareas se les permite entrar a su sección crítica después de que una tarea haya hecho una petición para entrar a esa sección crítica y antes de que se le conceda el acceso.
+
+Este problema se podría solucionar fácilmente en un entorno con solo un núcleo de ejecución si se pudiera evitar que se interrumpiera una tarea mientras está modificando una variable compartida. De esta manera, se garantiza que la secuencia de instrucciones se podría ejecutar sin interrupciones por parte del planificador de la CPU. No se ejecutarían otras instrucciones, por lo tanto, no habrían modificaciones inesperadas a los datos variables.
+
+Por desgracia, esta solución no es factible en entornos con varios núcleos de ejecución de hardware. Deshabilitar las interrupciones en un procesador puede ser caro en términos de tiempo, puesto que ese mensaje tiene que llegar a todos los núcleos, además de otros efectos indeseados.
+
+# Algoritmo de Peterson
+
+Una posible solución a las condiciones de carrera basada en software que permite a dos o más tareas compartir un recurso único sin conflicto es la propuesta por Peterson, usando tan solo memoria compartida para la comunicación. De cualquier manera, la forma en la que las arquitecturas modernas ejecutan las instrucciones de bajo nivel (como `load` y `store`, que leen y escriben datos desde la RAM a los registros de la CPU) evitan que esta solución pueda funcionar correctamente. Pero aún así, ofrece una buena descripción algorítmica de como solucionar el problema de la sección crítica.
+
+Hay dos tareas que alternan la ejecución entre sus secciones críticas y sus secciones restantes. Las tareas son *T0* y *T1*. Las dos tareas comparten dos variables en memoria. En este caso, la tarea 0 es `i` y la 1 es `j`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+int turn;
+bool flag[2] = {false, false};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [peterson_data]: Datos compartidos]
+
+La variable `turn` es un entero, y `flag` es un vector de dos elementos que contienen valores booleans.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+while (true) {
+    flag[i] = true;
+    turn = j;
+    while (flag[j] && turn == j) {
+        // Critical section
+    }
+
+    flag[i] = false;
+    // Remainder section
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [peterson_structure]: Estructura de la tarea *Ti*]
+
+La variable `turn` indica de quien es el turno de entrar a su sección crítica. Es decir, si `turn == i`, entonces la tarea *Ti* puede entrar a ejecutar su sección crítica. El vector `flag` se usa para indicar si un proceso está listo para entrar en su sección crítica. Por ejemplo, si `flag[i] == true`, entonces la tarea *Ti* está lista para ejecutar su sección crítica.
+
+Para entrar en la sección crítica, la tarea *Ti* primero asigna el valor `true` a `flag[i]` para indicar que está lista para entrar a su sección crítica, y luego asigna el valor `j` a la variable `turn`, afirmando así que si otra tarea quiere entrar a la sección crítica, puede hacerlo. Si ambas tareas intentan entrar a la vez, la variable `turn` será asignada con los valores `i` y `j` más o menos a la vez. Solo una de esas dos asignaciones sobrevivirá, la otra ocurrirá, pero será sobreescrita inmediatamente. El valor de `turn` determina cual de las dos tareas tiene permiso para entrar a la sección crítica antes.
+
+Para probar que la solución correcta hay que probar las tres condiciones anteriormente descritas.
+
+1. Se preserva la exclusión mutua
+2. El requisito de progreso se satisface
+3. Se cumple la espera limitada
+
+Para probar la primera, se puede ver que cada tarea *Ti* entra en su sección crítica solo si `flag[j] == false` o `turn == i`. Además, si ambas tareas pudieran ejecutar sus secciones críticas a la vez, entonces `flag[0] == flag[1] == true`. Estas dos observaciones implican que las tareas *T0* y *T1* no podrían haber ejecutado con éxito sus sentencias `while` en el mismo momento, puesto que el valor de `turn` puede ser 0 o 1, pero no puede ser ambos. Por tanto, uno de los procesos (por ejemplo *Tj*) ha ejecutado su sentencia `while` con éxito, mientras que el otro *Ti* haya tenido que ejecutar una sentencia adicional `turn == j`. Sin embargo, en ese momento, `flag[j] == true` y `turn == j`, y está condición durará mientras *Tj* se encuentre en su sección crítica, y como resultado, se preserva la exclusión mutua.
+
+Para probar la segunda y tercera propiedad, se puede ver que la tarea *Ti* solo puede ser apartada de ejecutar su sección crítica si se queda atascada en su loop `while` con la condición `flag[j] == true` y `turn == j`, este bucle es el único posible. Si *Tj* no está lista para entrar en su sección crítica, entonces `flag[j] == false`,  y *Ti* puede entrar en su sección crítica. Si *Tj* ha asignado `true` a `flag[j]` y además está ejecutando su sentencia `while`, entonces o `turn == i` o `turn == j`. Si `turn == i`, entonces *Ti* entrará en su sección crítica. Si `turn == j`, entonces *Tj* será la que entre en su sección crítica. Sin embargo, una vez que *Tj* salga de su sección crítica, asignará `flag[j] = false`, permitiendo a *Ti* entrar a su sección crítica. Si *Tj* asigna `flag[j] = true`, también debe asignar `turn = i`. Así, puesto que *Ti* no cambia el valor de la variable `turn` mientras está ejecutando su sentencia `while`, *Ti* entrará en la sección crítica (progreso) después de que al menos *Tj* haya entrado una vez (espera limitada).
+
+No está garantizado que esta solución funcione en arquitecturas modernas por la sencilla razón que, para mejorar el rendimiento del sistema, procesadores y/o compiladores pueden reordenar las operaciones de lectura y escritura que no tienen dependencias. En una aplicación monohilada, este reordenamiento no tiene importancia en cuanto a la precisión del propósito del programa, puesto que los valores finales son consistentes con lo esperado. Pero en una aplicación multihilo con datos compartidos, el reordenamiento de instrucciones puede acabar en resultados inconsistentes o inesperados.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+boolean flag = false;
+int x = 0;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [peterson_data]: Datos compartidos entre dos hilos]
+
+Por ejemplo, se tienen unos datos compartidos por dos hilos, un entero y un boolean. Cuando el hilo 1 ejecuta estas sentencias:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+while (!flag) {...}
+print x;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [peterson_t1]: Ejecución hilo 1]
+
+Y el hilo 2 ejecuta:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+x = 100;
+flag = true;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [peterson_t2]: Ejecución hilo 2]
+
+El comportamiento esperado es que la salida del hilo 1 sea 100 para la variable `x`. Sin embargo, puesto que no hay dependencias entre las variables `flag` y `x`, es posible que un procesador reordene las instrucciones para el hilo 2, de tal manera que `flag = true` se ejecute antes que `x = 100`. En esta situación es posible que el hilo 1 obtenga como salida el valor 0 para la variable `x`. Menos obvio es que el procesador pueda incluso reordenar las sentencias del hilo 1, y cargar la variable `x` antes de cargar el valor de `flag`. Si esto ocurriese, el hilo 1 mostraría un valor 0 para la variable `x` aunque las instrucciones del hilo 2 no se reordenaran.
+
+Este efecto puede repercutir seriamente en el algoritmo de Peterson, si las asignaciones de las dos primeras sentencias que aparecen en la sección de entrada en Listing [peterson_structure] se reordenaran entonces habría un problema. Sería posible que ambos hilos estuvieran activos en sus secciones críticas a la vez.
+
+# Soporte hardware para sincronización
+
+Las soluciones basadas en software, como la vista anteriormente, no necesitan ningún soporte especial por parte del sistema operativo o del hardware para asegurar la exclusión mutua. Pero, en arquitecturas modernas no está garantizado que funcionen correctamente. Para ello, son necesarios otros sistemas a más bajo nivel que se pueden usar directamente como herramientas de sincronización, o bien, como base para mecanismos de sincronización abstractos.
+
+## Barreras de memoria
+
+En un sistema moderno es habitual que el compilador o el procesador reordene las instrucciones de un código para optimizar el rendimiento, pero esta política puede llevar a estados poco fiables en los datos. Se llama *modelo de memoria* a como una arquitectura determina que garantías de memoria proporcionará a una aplicación. En general suelen ser de dos tipos:
+
+1. Fuertemente ordenada, donde una modificación de memoria en un procesador es inmediatamente visible a todos los otros procesadores.
+2. Débilmente ordenada, donde modificaciones de memoria en un procesador pueden no ser inmediatamente visibles al resto de procesadores.
+
+Los modelos de memoria varían en función del tipo de procesador, así que al desarrollar un sistema operativo no se puede asumir nada al respecto de la visibilidad de las modificaciones a la memoria en un multiprocesador con memoria compartida. Para solucionar este problema, las arquitecturas modernas proveen instrucciones que pueden forzar que cualquier modificación de memoria se propague a todos los procesadores, asegurando así que las modificaciones de memoria sean visibles a los hilos que se están ejecutando en otros procesadores. Estas instrucciones se llaman *barreras de memoria*. Cuando se ejecuta una de estas instrucciones el sistema asegura que todas las instrucciones de *load* y *store* se completen antes de cualquier subsiguiente operación de *load* o *store* se pueda ejecutar. De tal manera, que aunque las instrucciones se reordenen, estas barreras de memoria aseguran que las operaciones que guardan datos en la memoria se completan y son visibles para el resto de procesadores antes de que cualquier futura operación de lectura o escritura de memoria se ejecute.
+
+Volviendo al ejemplo anterior, en el cual reordenar las instrucciones podría resultar en un resultado incorrecto, pero usando una barrera de memoria.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+while (!flag) {
+    memory_barrier();
+    ...
+}
+print x;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [memory_barrier_t1]: Ejecución hilo 1]
+
+Al añadir una barrera de memoria en el hilo 1, se asegura que el valor de `flag` se cargué antes que el valor de `x`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+x = 100;
+memory_barrier();
+flag = true;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [memory_barrier_t2]: Ejecución hilo 2]
+
+De igual manera, si se pone una barrera de memoria entre las dos sentencias de asignación del hilo 2 se asegura que la asignación de `x` sucede antes de la asignación de `flag`.
+
+En el algoritmo de Peterson se podría poner una barrera de memoria entre las dos primeras sentencias de asignación en la sección de entrada para evitar el reordenamiento de operaciones. Las barreras de memoria son consideradas operaciones de muy bajo nivel y solo se suelen usar por desarrolladores de sistemas operativos al escribir código especializado en asegurar exclusión mutua.
+
+## Instrucciones hardware
+
+La mayoría de sistemas modernos ofrecen instrucciones especiales de hardware que permiten verificar y modificar el contenido de una palabra (`word` o tamaño nativo de datos de un procesador) de manera atómica, o incluso intercambiar el contenido de dos palabras también atómicamente. Es decir, como una sola unidad inseparable. Se pueden usar estas instrucciones especiales para solucionar el problema de la sección crítica de una forma relativamente simple.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+boolean test_and_set(boolean *target) {
+    boolean rv = *target;
+    *target = true;
+
+    return rv;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [test_and_set]: Definición de la instrucción `test_and_set`]
+
+Esta es una posible implementación de la instrucción `test_and_set`, donde su característica más importante es que se ejecuta atómicamente. Esta instrucción (en esta implementación para booleans), asigna el valor `true` a la variable que llamemos y nos devuelve el valor que tuviera anteriormente, todo en un solo paso atómico. Es decir, si dos instrucciones `test_and_set` se ejecutaran simultáneamente (cada una en un núcleo diferente), se ejecutarían secuencialmente en algún orden arbitrario. Si la maquina soporta esta instrucción `test_and_set`, se puede implementar la exclusión mutua declarando una variable booleana `lock` inicializada a false.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+lock = false;
+while (true) {
+    while (test_and_set(&lock)) {
+        /* do nothing */
+    }
+    /* critical section */
+    lock = false;
+    /* remainder section */
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [test_and_set_exclusion]: Implementación de exclusión mutua con la instrucción `test_and_set`]
+
+Cuando el proceso quiere entrar en la sección crítica, ejecuta la instrucción `test_and_set`, que coge el valor de la variable `lock` y en un paso indivisible la asigna a true, y devuelve el valor anterior. Si el valor devuelto es false, el hilo sabe que ha adquirido el `lock` con éxito y puede entrar en la sección crítica. Si el valor devuelto era true, significa que otro proceso tiene el `lock`, y hay que esperar hasta que el `lock` se libere. Cuando sale de la sección crítica, pone la variable `lock` a false, permitiendo que otro proceso que estuviera esperando pueda coger el `lock` y entrar a su sección crítica.
+
+La instrucción `compare_and_swap` (CAS) opera en dos palabras de manera atómica, pero usa un mecanismo diferente, basado en el intercambio del contenido de dos palabras.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+int compare_and_swap(int *value, int expected, int new_value) {
+    int temp = *value;
+    if (*value == expected)
+        *value = new_value;
+    return temp;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [compare_and_swap]: Definición de la instrucción `compare_and_swap`]
+
+La instrucción `compare_and_swap` trabaja con 3 parámetros. Al parámetro `value` se le asigna el valor de `new_value` solo si la expresión `*value == expected` es cierta. En cualquier caso, se devuelve el valor original de la variable `value`. La característica importante de esta instrucción es que se ejecuta de manera atómica. Es decir, si se ejecutan dos instrucciones CAS simultáneamente (cada una en un núcleo distinto), se ejecutarán de manera secuencial en cualquier orden arbitrario.
+
+Se puede implementar la exclusión mutua a través de una instrucción CAS.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+lock = 0;
+while (true) {
+    while (compare_and_swap(&lock, 0, 1) != 0) {
+        /* do nothing */
+    }
+    /* critical section */
+    lock = 0;
+    /* remainder section */
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [compare_and_swap_exclusion]: Implementación de exclusión mutua con la instrucción `compare_and_swap`]
+
+Se define una variable global `lock` y se inicializa a 0. El primer hilo que invoque la función `compare_and_swap` pondrá `lock` a 1, y entrará en su sección crítica. Puesto que el valor original de `lock` era igual al valor esperado de 0. Las siguientes llamadas a `compare_and_swap` no tendrán éxito, puesto que ahora `lock` no es igual al valor esperado 0. Cuando un proceso sale de su sección crítica, vuelve a poner `lock` a 0, lo que permite que otro hilo entre a su sección crítica.
+
+Pese a que este algoritmo satisface el requisito de la exclusión mutua, no lo hace con el de la espera limitada.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+while (true) {
+    waiting[i] = true;
+    key = 1;
+    while (waiting[i] && key == 1)
+        key = compare_and_swap(&lock,0,1);
+    waiting[i] = false;
+
+    /* critical section */
+
+    j = (i + 1) % n;
+    while ((j != i) && !waiting[j])
+        j = (j + 1) % n;
+
+    if (j == i)
+        lock = 0;
+    else
+        waiting[j] = false;
+
+    /* remainder section */
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [compare_and_swap_exclusion2]: Implementación de exclusión mutua con la instrucción `compare_and_swap` con espera limitada]
+
+Para garantizar este otro requisito, se necesita una estructura de datos más.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+boolean waiting[n];
+int lock = 0;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [compare_and_swap_exclusion2_data]: Estructura de datos]
+
+Los elementos en el array `waiting` se inicializan a false, y lock a 0. Para probar que se cumple el requisito de exclusión mutua, se puede observar que una tarea *Ti* puede entrar a su sección crítica solo si `waiting[i] ==  false` o `key == 0`. El valor de `key` puede ser 0 solo si la instrucción `compare_and_swap` se ejecuta. La primera tarea en ejecutar la instrucción `compare_and_swap` encontrará `key == 0`, las otras tendrán que esperar. La variable `waiting[i]` cambia a false solo si otra tarea deja su sección crítica, solo un `waiting[i]` se pone a false, manteniendo el requisito de exclusión mutua.
+
+Para probar que el requisito de progreso se cumple, aplican los argumentos anteriores, puesto que un proceso que sale de su sección crítica o bien pone `lock = 0` o `waiting[i]` a false. Ambos casos permiten a otra tarea que esté esperando a entrar a su sección crítica.
+
+Para probar que el requisito de espera limitada se cumple, cuando una tarea deja su sección crítica, escanea el array `waiting` en orden cíclico (i+1, i+2, ..., n-1, 0, ..., i-1). Designa a la primera tarea dentro de este orden que está en la sección de entrada `waiting[j] == true` como la siguiente para entrar en la sección crítica. Cualquier tarea esperando a entrar en su sección crítica lo hará dentro de al menos n-1 turnos.
+
+## Variables atómicas
+
+Habitualmente, la instrucción `compare_and_swap` no se usa directamente para manejar la exclusión mutua. Se suele usar como bloque fundamental para construir otras herramientas que solucionan el problema de la sección crítica, como las *variables atómicas*, que proveen operaciones atómicas en tipos de datos básicos como enteros o booleans. Incrementar o decrementar un valor entero puede producir una condición de carrera. Las variables atómicas se pueden usar para asegurar la exclusión mutua en situaciones donde puede existir una condición de carrera sobre una sola variable mientras se está actualizando, como cuando se incrementa un contador.
+
+La mayoría de sistemas que soportan variables atómicas proveen tipos de datos atómicos especiales y también funciones para acceder y manipular dichas variables atómicas. Estas funciones suelen estar implementadas usando la instrucción `compare_and_swap`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void increment(atomic_int *v) {
+    int temp;
+    do {
+        temp = *v;
+    } while (temp != compare_and_swap(v, temp, temp+1));
+}
+
+...
+
+atomic_int sequence = 0;
+increment(&sequence);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [compare_and_swap_increment]: Incremento de entero con `compare_and_swap`]
+
+Es importante tener en cuenta, que pese a que las variables atómicas ofrecen actualizaciones atómicas, no solucionan las condiciones de carrera en todas las circunstancias. Por ejemplo, en el problema productor-consumidor, se podría usar una variable entera atómica para `n_elems`. Esto aseguraría que las actualizaciones a `n_elems` fueran atómicas. Sin embargo, las tareas productoras y consumidoras también tienen bucles `while` cuyas condiciones dependen del valor de `n_elems`. Si el buffer estuviera vacío y dos consumidores están en el bucle esperando que `n_elems > 0`, si un productor introduce un elemento en el buffer, ambos consumidores podrían salid de sus bucles `while` (puesto que `n_elems` ya no sería igual a 0) y proceder a consumir, mientras que el valor de `n_elems` solo era de 1.
+
+Las variables atómicas se usan de manera habitual en sistemas operativos y aplicaciones concurrentes, aunque su uso se suele limitar a actualizaciones simples de datos compartidos como contadores o generadores de secuencias.
+
+# Exclusión mutua
+
+Las soluciones hardware propuestas al problema de la sección crítica vistas anteriormente suelen ser complicadas y generalmente inaccesibles para programadores de aplicaciones. En su lugar, los programadores de sistemas operativos construyen herramientas de software de más alto nivel para resolver este problema. El más simple de todos ellos es el bloqueo *mutex*, cuyo nombre viene de **mut** ual **ex** clusion. Se usa un `mutex` para proteger secciones críticas y por tanto prevenir condiciones de carrera. De esta manera, una tarea debe obtener el bloqueo antes de entrar en su sección crítica, y liberarlo cuando sale de ella. La función `acquire()` lo obtiene, y la función `release()` lo libera.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+while (true) {
+    lock.acquire();
+    /* critical section*/
+    lock.release();
+    /* remainder secion*/
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [mutex]: Uso de `mutex`]
+
+Un `mutex` tiene una variable booleana `available` cuyo valor indica si el bloqueo está disponible o no. Si lo está, una llamada a `acquire()` tiene éxito y entonces el bloqueo se considera que no está disponible. Un hilo que intenta adquirir un `mutex` no disponible se queda bloqueado hasta que el `mutex` se libera.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void acquire() {
+    while (!available) {
+        /* busy wait */
+    }
+    available = false;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [mutex_acquire]: Definición de `acquire`en un `mutex`]
+
+Las definiciones o implementaciones a alto nivel de dichas funciones son bastante directas.
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void release() {
+    available = true;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [mutex_release]: Definición de `release`en un `mutex`]
+
+Las llamadas tanto a `acquire()` como a `release()` deben realizarse de manera atómica. Por lo tanto, los `mutex` se pueden implementar usando la operación `compare_and_swap`.
+
+Los `mutex` pueden ser competitivos (*contended*) o no (*uncontended*). Si un hilo se bloquea intentando adquirir el `mutex`, entonces se considera un `mutex` competitivo. Pero si el `mutex` está disponible (*available*) cuando un hilo intenta adquirirlo, entonces el `mutex` es no competitivo. Los `mutex` competitivos, pueden experimentar alta competitividad (*high contention*) (un número alto de hilos intentando adquirir el `mutex`) o baja competitividad (*low contention*) (un número relativamente bajo de hilos están intentando adquirir el `mutex`). Como es de esperar, `mutex` con alta competitividad tienden a perjudicar el rendimiento general de las aplicaciones concurrentes.
+
+La principal desventaja de la implementación Listing [mutex_acquire] es que requiere de espera activa (*busy waiting*). Mientras un hilo está en su sección crítica, cualquier otro hilo que intente entrar en la suya tiene que estar dentro de un bucle esperando en la llamada a `acquire()`. Esta ejecución continua es claramente un problema en un sistema real multihilo, donde un núcleo físico es compartido por varios hilos. La espera activa también desperdicia ciclos de procesador que otros hilos pueden usar de manera productiva.
+
+A este tipo de bloqueos se les llama *spin locks*, puesto que el proceso está girando (spins) mientras está esperando al bloqueo a liberarse. La ventaja que presentan estos *spin locks* es que no hace falta un cambio de contexto cuando un hilo tiene que esperar a que se libere el bloqueo, y un cambio de contexto puede incurrir en un coste temporal importante. En ciertas circunstancias, los *spin locks* pueden ser la elección correcta. Si un bloqueo se va a adquirir por un breve periodo de tiempo, un hilo puede estar en espera activa en un núcleo mientras otro hilo está trabajando en su sección crítica en otro núcleo. Esperar a un bloqueo requiere al menos de dos cambios de contexto (uno para mover el hilo al estado de espera y un segundo para restaurar el hilo que estaba esperando una vez el bloqueo está disponible) la regla general es usar un *spin lock* si el bloqueo va a estar levantado menos de dos cambios de contexto. En sistemas modernos de varios núcleos, los *spin locks* se usan de manera habitual.
+
+# Semáforos
+
+Un semáforo *S* es una variable entera que, además de para inicializarse, se accede solo a través de dos operaciones standard atómicas, `wait()` y `signal()`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void wait(S) {
+    while ( S<=0 ) {
+        /* busy wait*/
+    }
+    S--;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [semaphore_wait]: Definición de `wait`en un semáforo]
+
+Todas las modificaciones al valor entero del semáforo en las operaciones `wait()` y `signal()` deben ser ejecutadas de manera atómica. Es decir, cuando un hilo modifica el valor del semáforo, ningún otro hilo puede modificar simultáneamente ese mismo valor. Además, en el caso de `wait()`, la verificación del valor de *S* `S<=0`, así como su posible modificación `S--` debe ser ejecutada sin interrupción.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void signal(S) {
+    S++;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [semaphore_signal]: Definición de `signal`en un semáforo]
+
+## Uso de semáforos
+
+A menudo se distingue entre semáforos binarios o de contador. El valor de un *semáforo contador* o *general* puede estar dentro del rango de un dominio sin restricciones, mientras que en un *semáforo binario* el valor solo puede ser 0 o 1. Así pues, los semáforos binarios se comportan exactamente como bloqueos `mutex`. De hecho, en sistemas que no ofrecen `mutex` se pueden usar estos semáforos binarios para manejar la exclusión mutua.
+
+Los semáforos generales o contadores, se pueden usar para controlar el acceso a un recurso determinado en un número finito de instancias. El semáforo se inicializa al número de recursos disponibles. Entonces, cada hilo que quiere usar un recurso realiza una operación `wait()` sobre el semáforo (decrementando el contador). Cuando el hilo libera el recurso, realiza una operación `signal()` (incrementando el contador). Cuando el contador del semáforo llega a 0, todos los recursos han sido usados. Después de esto, los hilos que quieren usar un recurso se bloquearán hasta que el contador vuelva a ser mayor que 0.
+
+También se pueden usar semáforos para resolver varios problemas de sincronización. Por ejemplo, dos hilos concurrentes, *H1* con una sentencia *S1* y *H2* con una sentencia *S2*. Se necesita que *S2* sea ejecutada solo una vez se haya completado *S1*. Se puede implementar haciendo que *H1* y *H2* compartan un semáforo común `synch`, inicializado a 0.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+S1;
+signal(synch);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [semaphore_s1]: Uso de semáforo en *H1*]
+
+En el hilo *H1* se ejecuta la sentencia *S1* y luego se hace `signal` sobre el semáforo, mientras que en el hilo *H2* se espera al semáforo con `wait` y luego se ejecuta *S2*. Puesto que el semáforo se ha inicializado con 0, *H2* ejecutará *S2* solo cuando *H1* haya invocado `signal` tras haber ejecutado *S1*.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+wait(synch);
+S2;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [semaphore_s2]: Uso de semáforo en *H2*]
+
+## Implementación de semáforos
+
+La implementación mostrada anteriormente de un `mutex` sufría del problema de la espera activa. Las definiciones propuestas de `wait` y `signal` sufren del mismo problema. Para superar este problema, se pueden modificar dichas definiciones. Cuando un hilo ejecuta la operación `wait` y encuentra que el valor del semáforo no es positivo, debe esperar. Sin embargo, en lugar de entrar en una espera activa, el hilo se puede suspender a si mismo. La operación de suspensión pone al hilo en una cola de espera asociada con el semáforo, y el estado del hilo cambia al de espera. Entonces el control es transferido al scheduler de la CPU, que selecciona otro proceso para ser ejecutado.
+
+Un proceso que es suspendido, esperando a un semáforo S, debería volver a la ejecución cuando otro proceso ejecuta una operación `signal`. El proceso se despierta a través de una operación `wakeup()`, que cambia el estado del proceso de espera al de preparado. La CPU puede que salte inmediatamente o no a ese proceso que se despierta, en función del algoritmo del scheduler.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+typedef struct {
+    int value;
+    struct process *list;
+} semaphore;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [semaphore_data]: Estructura de datos de un semáforo]
+
+Cada semáforo tiene un valor entero `value` y una lista de procesos `list`. Cuando un proceso debe esperar en un semáforo, se le añade a la lista de procesos. Una operación `signal` elimina un proceso de la lista de procesos en espera y despierta a dicho proceso.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void wait(semaphore *S) {
+    S->value--;
+    if (S->value < 0) {
+        S->list.append(this_process);
+        sleep();
+    }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [semaphore_wait]: `wait` de un semáforo]
+
+La operación `sleep()` suspende al proceso que la invoca. Y la operación `wakeup(P)` despierta y reanuda la ejecución de un procesos suspendido P. Estas dos operaciones las ofrece el sistema operativo como llamadas básicas al sistema.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void signal(semaphore *S) {
+    S->value++;
+    if (S->value <= 0) {
+        process P = S->list.pop;
+        wakeup(P);
+    }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [semaphore_signal]: `signal` de un semáforo]
+
+En esta implementación los valores de los semáforos pueden ser negativos, mientras que esto no es posible bajo la definición clásica de semáforos con espera activa. Si el valor de un semáforo es negativo, su magnitud es el número de procesos que están a la espera en ese semáforo. Esto resulta de cambiar el orden del decremento y el test en la implementación de la operación `wait`.
+
+La lista de procesos en espera se puede implementar fácilmente con un campo link dentro del bloque de control de cada proceso (*process control block*). Cada semáforo contiene un valor entero y un puntero a una lista de PCBs. Una forma de añadir o eliminar procesos de la lista para asegurar la espera limitada es usar una cola *FIFO*, donde el semáforo contiene punteros a la cola y la cabeza de la cola. Pero en general, la lista puede usar cualquier estrategia de colas. El uso correcto de los semáforos no depende de una estrategia particular de colas para esta lista de semáforos.
+
+Es crítico que las operaciones se ejecuten de manera atómica. Se debe garantizar que dos procesos no puedan ejecutar operaciones `wait` y `signal` sobre el mismo semáforo a la vez. Es un problema de sección crítica, y en un entorno con un solo procesador, se pueden solucionar simplemente deshabilitando las interrupciones durante el tiempo que `wait` y `signal` se están ejecutando. Esto funciona, porque una vez se inhiben las interrupciones las instrucciones de distintos procesos no se pueden intercalar. Solo el proceso que está en ejecución puede funcionar hasta que las interrupciones se reestablezcan y el scheduler tome de nuevo el control.
+
+En un entorno con varios núcleos, las interrupciones se deben deshabilitar en cada núcleo de procesamiento. De otra manera, las instrucciones de diferentes procesos (ejecutándose en distintos núcleos) pueden ser intercaladas en cualquier orden arbitrario. Deshabilitar las interrupciones en cada núcleo puede ser una tarea difícil y puede perjudicar seriamente el rendimiento. Con lo cual, estos sistemas usan diferentes alternativas, como `compare_and_swap` o *spinlocks*, para asegurar que `wait` y `signal` se ejecuten de manera atómica.
+
+Es importante admitir que no se elimina completamente la espera activa en esta definición de las operaciones `wait` y `signal`. De hecho, se ha movido dicha espera activa de la sección de entrada a las secciones críticas de los programas. Es más, se ha limitado la espera activa a las secciones críticas de `wait` y `signal`, y esas secciones son cortas (si están bien implementadas, no deberían ser más de 10 instrucciones a bajo nivel). Así pues, la sección crítica casi nunca estará ocupada, y la espera activa ocurre raramente, y solo por un periodo corto de tiempo. Una situación completamente distinta sucede cuando una aplicación tiene secciones críticas que pueden ser largas (minuto o incluso horas), o casi siempre están ocupadas. En esos casos, la espera activa es muy ineficiente.
+
+# Monitores
+
+A pesar de que los semáforos ofrecen un mecanismo eficiente y conveniente para la sincronización de procesos, usarlos de manera incorrecta puede acabar en errores de temporalización que son difíciles de detectar. Y estos errores suceden solo si una determinada secuencia de ejecución de instrucciones tiene lugar, y esta secuencia no siempre sucede.
+
+Este tipo de errores se han tratado anteriormente al usar un contador en el problema productor-consumidor. En ese ejemplo, el error de temporalización sucedía raramente, e incluso entonces, el valor de `n_elems` parecía razonable, solo era un error de 1. Sin embargo, la solución no es aceptable, y por eso se introdujeron los `mutex` y semáforos.
+
+Por desgracia, estos errores pueden seguir sucediendo aún usando estos mecanismos. Volviendo a la solución del problema de la sección crítica a través de semáforos. Todos los procesos comparten un semáforo binario llamado `mutex`, que se inicializa a 1. Cada proceso debe ejecutar `wait(mutex)` antes de entrar en su sección crítica y llamar a `signal(mutex)` tras acabar. Si esta secuencia no se respeta, dos procesos pueden entrar en su sección crítica simultáneamente. Se pueden producir una serie de problemas derivados, incluso si tan solo uno de los procesos se comportan de manera desordenada (puede ser por un error honesto de programación o intencionado).
+
+- Un programa intercambia el orden en cual las operaciones `wait` y `signal` sobre el semáforo `mutex` se ejecutan.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+signal(mutex);
+/* critical section*/
+wait(mutex);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [semaphore_1]: Orden invertido de uso de semáforo]
+
+En esta situación, varios procesos pueden estar trabajando en su sección crítica simultáneamente, violando el requisito de exclusión mutua. Este error se puede descubrir solo si varios procesos están activos simultáneamente en sus secciones críticas, y muchas veces no es fácilmente reproducible.
+
+- Un programa reemplaza una operación `signal(mutex)` por una `wait(mutex)`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+wait(mutex);
+/* critical section*/
+wait(mutex);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [semaphore_2]: Dos operaciones `wait`]
+
+En este caso, el proceso se bloqueará permanentemente en la segunda llamada a `wait`, puesto que el semáforo no está disponible.
+
+- Un proceso omite una de las dos operaciones, o ambas. En ese caso, o bien se viola la exclusión mutua o el proceso se bloquea de manera permanente.
+
+Estos errores pueden ser fácilmente generados cuando los programadores usan los semáforos o `mutex` incorrectamente para resolver el problema de la exclusión mutua. Una estrategia para lidiar con estos errores es incorporar herramientas simples de sincronización como construcciones en los lenguajes de alto nivel. Como por ejemplo, los monitores.
+
+## Uso de monitores
+
+Un tipo de datos abstracto de datos encapsula datos con un conjunto de funciones para operar sobre esos datos que son independientes de cualquier implementación específica. Un tipo *monitor* es un tipo abstracto de datos que incluye un conjunto de operaciones que ya viene con la exclusión mutua implementada dentro del propio monitor. También declara las variables cuyos valores definen el estado de una instancia de este tipo, junto con las funciones que operan sobre esas variables.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+monitor monitor_name {
+    /* shared variable declarations */
+    function P1 () {}
+    function P2 () {}
+    function Pn () {}
+    initialization_code () {}
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [monitor]: Pseudo código de un monitor]
+
+La representación de un tipo monitor no puede ser usada directamente por los hilos. Así, una función definida dentro de un monitor puede acceder solo a esas variables declaradas localmente dentro del monitor y sus parámetros formales. De igual manera, a las variables locales de un monitor solo se puede acceder por las funciones locales.
+
+![Figure [res/003_001]: Vista esquemática de un monitor](res/003_001.png)
+
+La construcción de un monitor asegura que solo un hilo a la vez está activo dentro del monitor. De esta manera, el programador no necesita codificar esta restricción de manera explícita. Sin embargo, hay que definir mecanismos de sincronización adicionales para que un monitor sea lo suficientemente potente para modelar algunos proyectos de sincronización complejos. Estos vienen a través de la construcción de las *condition*. Un programador que necesita escribir un tipo de sincronización a medida puede definir una o mas variables de tipo *condition*.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+condition x,y;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [condition]: Variables de tipo *condition*]
+
+Las únicas operaciones que pueden ser invocadas en una variable de condición son `wait()` y `signal()`. La llamada a `x.wait()` sobre la variable de condición `x`, implica que el proceso que la realiza se suspende hasta que otro proceso invoca `x.signal()` sobre la misma variable de condición.
+
+![Figure [res/003_002]: Monitor con variables de condición](res/003_002.png)
+
+La operación `x.signal()` reanuda exactamente un hilo suspendido. Si no hay ningún hilo suspendido, entonces esta operación no tiene ningún efecto, con lo cual, el estado de `x` es el mismo que si la operación nunca se hubiera realizado. En contraste con la operación `signal` asociada con semáforos, que siempre afectaba al estado del semáforo.
+
+Por ejemplo, la operación `x.signal()` se invoca por un hilo *H*, y existe otro hilo *I* suspendido que está asociado con esa condición `x`. Si el hilo suspendido *I* tiene permitido reanudar su ejecución, el hilo que señala *H* tiene que esperar. De otra manera, tanto *H* como *I* estarían activos a la vez en el mismo monitor. Sin embargo, conceptualmente, ambos hilos pueden continuar con su ejecución. Existen dos posibilidades:
+
+1. Signal and wait, *H* o bien espera hasta que *I* deja el monitor o espera sobre otra condición
+2. Signal and continue, *I* o bien espera hasta que *H* deja el monitor o espera sobre otra condición
+
+Hay argumentos válidos en favor de adoptar cualquiera de las dos opciones. Por un lado, puesto que *H* ya se estaba ejecutando en el monitor, el método `signal and continue` parece más razonable. Por otro, si se permite que *H* continue, para cuando *I* se reanude, la condición lógica por la cual *I* estaba esperando puede que ya se cumpla. Existe un compromiso intermedio entre ambas opciones, cuando el hilo *H* ejecuta la operación de `signal`, abandona inmediatamente el monitor. Por lo tanto, el hilo *I* se reanuda inmediatamente.
+
+Muchos lenguajes de programación han incorporado la idea de monitor de esta manera, como Java o C#, otros como Erlang ofrecen soporte a la concurrencia con mecanismos similares.
+
+## Implementar un monitor usando semáforos
+
+Se puede implementar un monitor usando semáforos. Para cada monitor, se usa un semáforo binario llamado `mutex` inicializado a 1, para asegurar la exclusión mutua. Un hilo debe ejecutar `wait(mutex)` antes de entrar en el monitor, y debe ejecutar `signal(mutex)` después de abandonarlo.
+
+Se usará el método `signal and wait`. Puesto que un hilo que llama a `signal` debe esperar hasta que el hilo que se reanuda o salga del monitor o vuelva al estado de espera, se introduce otro nuevo semáforo binario, llamado `next` inicializado a 0. El proceso que llama a `signal` puede usar `next` para suspenderse a si mismo. Una variable entera `next_count` se usará para contar el número de hilos suspendidos sobre `next`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+wait(mutex);
+
+/* body of function*/
+
+if (next_count > 0)
+    signal(next);
+else
+    signal(mutex);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [monitor]: Implementación del monitor]
+
+Se asegura la exclusión mutua dentro de un monitor.
+
+Se puede describir como se implementan las variables de condición. Para cada condición `x`, se introduce un semáforo binario `x_sem` y una variable entera `x_count`, ambos inicializados a 0. La operación `x.wait()` se puede implementar así.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+x_count++;
+if (next_count > 0)
+    signal(next);
+else
+    signal(mutex);
+
+wait(x_sem);
+x_count--;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [x_wait]: Implementación `wait` en una variable de condición]
+
+Y la operación `x.signal()` se puede implementar así.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+if (x_count > 0) {
+    next_count++;
+    signal(x_sem);
+    wait(next);
+    next_count--;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [x_signal]: Implementación `signal` en una variable de condición]
+
+Esta implementación es aplicable a las definiciones de monitores ofrecidas tanto por [#Hoare] y [#Binch-Hansen]. En algunos casos, sin embargo, la generalidad de la implementación no es necesaria, y se puede implementar con una mejora significativa en la eficiencia.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+monitor ResourceAllocator {
+    boolean busy;
+    condition x;
+
+    void acquire(int time) {
+        if (busy)
+            x.wait(time);
+        busy = true;
+    }
+
+    void release() {
+        busy = false;
+        x.signal();
+    }
+
+    initialization_code() {
+        busy = false;
+    }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [monitor_resource]: Implementación de un monitor para asignar un solo recurso]
+
+## Reanudando tareas dentro de un monitor
+
+Si muchos hilos esta suspendidos en una condición `x`, y se ejecuta una operación `x.signal()` por algún hilo, como se determina cual de los hilos suspendidos debe ser el siguiente en reanudarse? Una solución simple es un orden FIFO, de tal manera que los hilos que están esperando más tiempo son reanudados antes. En muchas circunstancias, sin embargo, un mecanismo de planificación tan simple no es adecuado. En estas circunstancias, se puede usar la construcción *conditional-wait*.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+x.wait(c);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [conditional-wait]: `conditional-wait`]
+
+Donde `c` es una expresión entera que se evalúa cuando la operación `wait` se ejecuta. El valor de `c`, llamado *priority number*, se almacena junto con el nombre del hilo que se suspende. Cuando se ejecuta `x.signal()`, el hilo con la prioridad más pequeña es el siguiente en ser reanudado.
+
+En Listing [monitor_resource] que controla la asignación de un solo recurso entre hilos que compiten entre ellos, cada hilo que solicita una asignación de dicho recurso, determina el tiempo máximo que planea usar el recurso. El monitor asigna el recurso al hilo con el tiempo más corto en su petición. Un hilo que necesita acceder al recurso tiene que seguir esta secuencia, donde *R* es una instancia del tipo `ResourceAllocator`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+R.acquire(t);
+/* access the resource*/
+R.release();
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [resource_allocator]: Uso de `Resource Allocator`]
+
+Por desgracia, el concepto de monitor no puede garantizar que se respete esa secuencia de acceso. En particular pueden suceder estos problemas:
+
+- Un hilo podría acceder a un recurso sin haber obtenido previamente el permiso de acceso para dicho recurso
+- Un hilo podría no liberar nunca un recurso una vez haya obtenido acceso asl mismo
+- Un hilo podría intentar liberar un recurso que nunca solicitó
+- Un hilo podría solicitar el mismo recurso dos veces (sin haberlo liberado previamente)
+
+Estas mismas dificultades se encuentran en el uso de semáforos, y son esas por las cuales se diseñaron los monitores. Antes había que preocuparse por el uso correcto de los semáforos, ahora hay que preocuparse por el uso correcto de las operaciones de alto nivel, en las cuales el compilador no puede ofrecer asistencia.
+
+Una posible solución es incluir operaciones RAII dentro del monitor `ResourceAllocator`. Sin embargo, eso significa que la planificación se hace de acuerdo al algoritmo de planificación embebido dentro del monitor en lugar del que se pueda diseñar.
+
+Para asegurar que un hilo sigue la secuencia adecuada, se deben inspeccionar todos los programas que hacen uso del monitor `ResourceAllocator` y el recurso que gestiona. Hay que verificar dos condiciones para establecer como de correcto es este sistema. Primero, los hilos del usuario debe siempre hacer sus llamadas en el monitor en la secuencia correcta. Segundo, hay que asegurar que un hilo no cooperativo no ignore la puerta de exclusión mutua que proporciona el monitor, e intente acceder al recurso directamente, sin usar los protocolos de acceso. Solo si estas dos condiciones se respetan se puede garantizar que no ocurran errores dependientes del tiempo y que el algoritmo de planificación tenga éxito.
+
+Este tipo de inspecciones se pueden desarrollar en sistemas pequeños o estáticos, pero para otros más grandes, complejos o dinámicos la complejidad es demasiado alta.
+
+# Liveness
+
+Una consecuencia de usar herramientas de sincronización para coordinar el acceso a secciones críticas es la posibilidad de que un hilo intentando entrar a su sección crítica esté esperando de manera indefinida. Se mencionaban anteriormente los tres requisitos que cualquier solución al problema de la sección crítica debe satisfacer. La espera indefinida incumple dos de ellos, el progreso y la espera limitada.
+
+La vivacidad(*liveness*) se refiere a un conjunto de propiedades que un sistema debe satisfacer para asegurar que un hilo progrese durante su ciclo de vida de ejecución. Un hilo esperando indefinidamente bajo las circunstancias anteriores es un ejemplo de fallo de vivacidad (*liveness failure*).
+
+Hay muchas formas en las que esto se manifiesta, sin embargo, todas acaban en bajo rendimiento y baja capacidad de respuesta. Un ejemplo simple de *liveness failure* es un bucle infinito. Un bucle de espera activa presenta esta posibilidad, especialmente si un hilo debe estar en el bucle un tiempo arbitrariamente largo de tiempo. Cualquier esfuerzo para asegurar la exclusión mutua usando mecanismos como los `mutex` o semáforos pueden a menudo llevar a estos fallos en la programación concurrente.
+
+## Deadlock
+
+La implementación de un semáforo con una cola de espera puede acabar en una situación donde dos o más hilos esperan indefinidamente a un evento que puede ser causado solo por uno de los procesos que están esperando. El evento en cuestión es la ejecución de la operación `signal()`. Cuando se alcanza este estado, estos hilos se dicen que se encuentran en un interbloqueo (*deadlock*).
+
+En un sistema con dos hilos *H0* y *H1*, cada uno accediendo a dos semáforos *S* y *Q*, ambos con el valor 1.
+
+H0 | H1
+:--------|:--------
+wait(S); | wait(Q);
+wait(Q); | wait(S);
+.. | ..
+.. | ..
+.. | ..
+signal(S); | signal(Q);
+signal(Q); | signal(S);
+[Table [deadlock]: Timeline de un *deadlock*]
+
+El hilo *H0* ejecuta `wait(S)` y entonces *H1* ejecuta `wait(Q)`. Cuando *H0* ejecuta `wait(Q)`, debe esperar hasta que *H1* ejecuta `signal(Q)`. De manera similar, cuando *H1* ejecuta `wait(S)` debe esperar hasta que *H0* ejecuta `signal(S)`. Y puesto que estas operaciones `signal`no se pueden ejecutar, ambos hilos muestran un interbloqueo o *deadlock*.
+
+Un conjunto de hilos están en un estado de interbloqueo cuando cada hilo en el conjunto está esperando a un evento que solo puede ser causado por otro hilo en ese conjunto. Los eventos que importan principalmente son la adquisición y liberación de recursos como los `mutex` o semáforos.
+
+## Inversión de prioridad
+
+Un desafío de planificación aparece cuando un hilo de alta prioridad necesita leer o modificar datos a los que está accediendo un hilo de baja prioridad, o una cadena de hilos de baja prioridad. Puesto que estos datos, suelen estar protegidos por algún *lock*, los hilos de alta prioridad tienen que esperar hasta que los de baja prioridad acaben con el recurso. La situación se vuelve más complicada si el hilo de baja prioridad es interrumpido en favor de otro hilo con una prioridad mayor.
+
+Por ejemplo, si se tienen tres procesos *L*, *M* y *H*, cuyas prioridades siguen el orden *L* < *M* < *H*. Se asume que el proceso *H* necesita un semáforo *S*, que está siendo usado por el proceso *L*. De manera habitual, el hilo *H* esperaría a que el hilo *L* acabara de usar el recurso *S*. Sin embargo, en este punto el hilo *M* cambia su estado a ejecutable, y por tanto interrumpiendo al hilo *L*. Indirectamente, un hilo con menor prioridad *M* ha afectado a cuanto tiempo el hilo *H* debe esperar hasta que *L* renuncie al recurso *S*.
+
+A este problema se le conoce como inversión de prioridad (*priority inversion*), y puede ocurrir en sistemas con más de dos prioridades. Se suele evitar implementando un protocolo de herencia de prioridad (*priority-inheritance protocol*). Según este protocolo, todos los hilos que están accediendo a un recurso que pueda necesitar un hilo de más prioridad, heredan esta alta prioridad hasta que han acabado con los recursos en cuestión. Cuando han acabado, sus prioridades vuelven a sus valores originales. En el ejemplo anterior, un protocolo como este hubiera permitido al hilo *L* heredar la prioridad del hilo *H*, por lo tanto evitando que el proceso *M* interrumpa su ejecución. Cuando el hilo *L* ha acabado de usar el recurso *S*, renuncia a su prioridad heredada de *H* y asume su prioridad original. Puesto que ahora el recurso *S* ya está disponible, el hilo *H* será el siguiente en ejecutarse, y no *M*.
+
+## Bibliografía
+
+[#Binch-Hansen]: P. Brinch-Hansen, Operating System Principles, Prentice Hall (1973). https://dl.acm.org/doi/abs/10.5555/540365
+
+[#Hoare]: C. A. R. Hoare, “Monitors: An Operating System Structuring Concept”, Communications of the ACM, Volume 17, Number 10 (1974), pages 549–557. https://dl.acm.org/doi/10.1145/355620.361161
+
+
+
+
+<link rel="stylesheet" href="res/md/viu.css">
+<style class="fallback">body{visibility:hidden}</style><script>markdeepOptions={tocStyle:'long'};</script>
+<!-- Markdeep: --><script src="res/md/markdeep.min.js?" charset="utf-8"></script>

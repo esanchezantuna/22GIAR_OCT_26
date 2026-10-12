@@ -1,0 +1,552 @@
+<meta charset="utf-8">
+**22GIAR - 002 - Hilos en C++**
+    <small>©2026 VIU - 22GIAR Programación Concurrente, Distribuida y Paralela - Iván Fuertes</small>
+
+# Introducción
+
+El soporte estándar para concurrencia a través del multihilo ha llegado a C++ a través del standard C++11. Ya no hay necesidad de usar extensiones o librerías específicas de plataforma, solo un compilador que soporte C++11. Ahora no solo hay un modelo de memoria con capacidad para soportar hilos sino que la biblioteca standard de C++ se ha extendido para incluir clases para gestionar hilos, proteger datos compartidos, operaciones de sincronización entre hilos y operaciones atómicas a bajo nivel.
+
+La librería de hilos está fuertemente basada en la experiencia acumulada a través del uso de las librerías de clases especificas de plataforma. En particular, la librería de hilos de Boost se usó como modelo primario, tal que muchas clases comparten nombres y estructura con las correspondientes de Boost.
+
+Una de las preocupaciones que los programadores relacionados con la programación de alto rendimiento tienen sobre C++ en general y las clases que envuelven a los servicios de bajo nivel, es sobre la eficiencia. Si se está buscando extraer el último suspiro en rendimiento, es importante entender los costes de implementación asociados a usar servicios de alto nivel, comparado a usar directamente los servicios de bajo nivel, este el coste de la penalización de la abstracción.
+
+El grupo detrás del desarrollo de C++ es consciente de ello, y uno de los objetivos cuando diseñaron la librería para multihilo era que no hubiera un beneficio significativo de usar las APIs de bajo nivel directamente, donde estuvieran disponibles. Por lo que la librería fue diseñada para permitir una implementación eficiente, con una pequeña penalización de abstracción, en la mayoría de plataformas.
+
+Otro objetivo de C++ es ofrecer suficientes servicios de bajo nivel para aquellos que quisieran trabajar cerca del metal para rascar el último gramo de rendimiento. Para eso, además del nuevo modelo de memoria llega una librería de operaciones atómicas para controlar directamente cada bit y byte y la sincronización entre hilos y visibilidad de cualquier cambio. Estos tipos atómicos y sus operaciones correspondientes ahora se pueden usar en muchos sitios donde los programadores antes tenían que desarrollar lenguaje ensamblador específico de plataforma. Así el nuevo código desarrollado es más portable y fácil de mantener.
+
+La librería standard también ofrece abstracciones de alto nivel y servicios que hacen que escribir código multihilo sea más sencillo y libre de errores. A veces, el uso de estos servicios viene con un coste de rendimiento por el código adicional que se debe ejecutar. Pero este coste no implica siempre una penalización a más alto nivel, en general, el coste no suele ser más alto del que se pagaría por escribir una funcionalidad equivalente a mano, y el compilador muchas veces puede optimizar ese código adicional.
+
+En algunos casos, estos servicios de más alto nivel ofrecen funcionalidad extra que va más allá de lo requerido para un uso específico. Pero nunca es un problema, en C++ todo se diseña siguiendo la máxima de no pagar por lo que no se usa.
+
+En aquellas raras ocasiones donde la librería standard de C++ no aporta el rendimiento o comportamiento que se necesita, puede ser necesario recurrir a servicios específicos de plataforma. Los tipos en la librería de hilos suelen ofrecer una función *native_handle()* que permite acceder a la implementación subyacente y gestionarlos directamente usando la API específica de la plataforma. Con lo cual, cualquier operación realizada usando *native_handle()* se convierte en dependiente de plataforma.
+
+# Hello, concurrent world!!!
+
+La única diferencia con el código mono-hilado es que algunas funciones pueden ejecutarse de manera concurrente, así que hay que asegurarse de que los datos compartidos sean seguros para el acceso concurrente. Para poder ejecutar funciones concurrentemente hay objetos específicos que deben ser usados para gestionar los distintos hilos.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <iostream>
+#include <thread>
+
+void hello_function() {                 //Function to be executed in a separate thread
+    std::cout << "From Thread" << std::endl;
+}
+
+int main() {
+    std::thread my_thread(function);
+    std::cout << "From Main Thread" << std::endl;
+    my_thread.join();
+    return 0;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread]: Función ejecutada en un hilo separado del principal]
+
+Las declaraciones para las funciones y clases para gestionar hilos se encuentran en la cabecera `<thread>`, mientras que las diseñadas para proteger datos compartidos están declaradas en otras cabeceras.
+
+El código que se va a ejecutar en un hilo separado se ha puesto en la función `hello_function`. Todo hilo tiene que tener una función inicial, que es donde empieza la ejecución del nuevo hilo. El hilo inicial en cualquier aplicación empieza en la función `main()`, pero para cualquier otro hilo se especifica en el constructor de un objeto `std::thread`. En el caso del ejemplo anterior, el objeto `my_thread`, de tipo `std::thread` se construye con la función `hello_function`, y esa función se lanza de manera concurrente en otro hilo distinto del principal, llevando el número de hilos activos a 2. El hilo inicial que empieza en `main()` y el nuevo hilo que empieza en `hello_function`.
+
+Una vez ese nuevo hilo se ha lanzado, el hilo principal sigue su ejecución, si este no esperara a que acabara el nuevo hilo, seguiría hasta el final de su ejecución, y al llegar al final del `main` cerraría la aplicación, probablemente antes de darle una oportunidad al nuevo hilo a ejecutarse. Por eso la llamada a `join`, que hace que el hilo que crea el nuevo hilo se espere a que este último acabe para seguir su ejecución.
+
+# Gestión de hilos
+
+## Gestión de hilos básica
+
+Cada programa C++ tiene al menos un hilo, el cual es lanzado por el runtime de C++, el hilo que ejecuta el `main()`. Ese programa entonces puede lanzar hilos adicionales que tengan a otra función como punto entrada. Esos hilos entonces se ejecutan concurrentemente entre ellos y con el hilo principal. Y al igual que el programa acaba cuando se acaba el `main()`, los hilos acaban cuando la función especificada en el punto de entrada del hilo acaba.
+
+### Lanzar un hilo
+
+Los hilos se arrancan construyendo un objeto `std::thread` que especifica la tarea a ejecutar en ese hilo. El caso más simple es una función ordinaria que devuelve `void` y no recibe parámetros. Esta función se ejecuta en su propio hilo hasta que acaba y entonces el hilo se para. En el otro extremo, la tarea puede ser una función que reciba parámetros adicionales y realice una serie de operaciones independientes especificadas a través de algún sistema de mensajería mientras se está ejecutando, y el hilo acaba solo cuando se le ha señalado que lo haga, también a través de algún sistema de mensajes. No importa lo que el hilo vaya a hacer o desde donde se lance, un hilo en C++ usando la *STL* se lanza construyendo un objeto `std::thread`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void function();
+std::thread thread(function);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread]: Función Ejecutada en un Hilo Separado]
+
+Tan simple como esto. Hay que asegurarse de incluir la cabecera `thread` para que el compilador pueda encontrar la definición de la clase `std::thread`. Esta clase trabaja con cualquier tipo *callable*, así que se le puede pasar una instancia de una clase con un operador de llamada a función `()` al constructor del `std::thread`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class Task {
+    public:
+      void operator() () const {
+        stsd::cout << "From Thread" << std::endl;
+      }
+  };
+
+  Task f;
+  std::thread thread(f);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread]: Método de Clase (operador ()) Ejecutado en un Hilo Separado]
+
+En este caso, el objeto función suministrado es copiado en el almacenamiento perteneciente al nuevo hilo creado e invocado desde ahí. Por lo que es importante que la copia se comporte de manera equivalente al original, o el resultado podría no ser el esperado.
+
+Al pasar una objeto función al constructor del hilo, si se pasa algo temporal en lugar de una variable con nombre, la sintaxis puede ser la misma que la de la declaración de una función, y en ese caso, el compilador lo interpreta de esa manera, en lugar de la definición del objeto.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::thread my_thread(background_task());
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread]: Declaración de función que devuelve un `std::thread`]
+
+Este código crea una función que recibe un sólo parámetro (del tipo puntero a función sin parámetros y que devuelve un objeto background_task) y devuelve un objeto `std::thread`, en lugar de lanzar un nuevo hilo. Se puede evitar esto nombrando al objeto función usando un par de paréntesis extra, o usando la sintaxis de inicialización.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::thread my_thread((background_task()));
+std::thread my_thread{background_task()};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread]: Paréntesis extra ó inicialización]
+
+En el primer caso, los paréntesis extra previenen la interpretación como si fuera la declaración de una función, permitiendo que `my_thread` sea declarada como una variable de tipo `std::thread`. El segundo caso, usa la sintaxis de inicialización uniforme con llaves en lugar de paréntesis, y por tanto, sería también declarada como variable.
+
+Un tipo de objeto `callable` que evita este problema son las expresiones *lambda*. Permite escribir una función local anónima posiblemente capturando algunas variables locales y evitando la necesidad de pasar argumentos adicionales.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::thread thread([] {
+    std::cout << "From Thread" << std::endl;
+});
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread]: Hilo ejecutando una función *lambda*]
+
+Una vez se ha lanzado el hilo, hay que decidir explícitamente si hay que esperar a que acabe (`join`) o abandonarlo a su suerte (`detach`). Si no se decide antes de que el objeto `std::thread` se destruya, entonces el programa acaba abruptamente, el destructor de `std::thread` llama a `std::terminate`. Con lo cual, es imperativo asegurarse que el hilo es correctamente tratado, incluso en la presencia de excepciones. Hay que tener en cuenta que hay que hacer esto antes de destruir el objeto `std::thread`, es posible que el hilo haya acabado su ejecución mucho antes de hacer un `join` o un `detach`, si se hace `detach` y el hilo aún está en ejecución continuará con su ejecución, y puede continuar en ejecución mucho después que el objeto `std::thread` haya sido destruido, solo finalizará su ejecución cuando finalmente retorne de la función del hilo.
+
+Si no se espera a la finalización del hilo, entonces hay que asegurarse que los datos a los que accede el hilo son válidos hasta que el hilo haya acabado con ellos. Este no es un problema nuevo, incluso con código monohilado es un problema (normalmente comportamiento indefinido) acceder a un objeto después de haberlo destruido, pero el uso de hilos da una nueva oportunidad de encontrarse con estos problemas de tiempo de vida de los datos.
+
+Esto suele suceder cuando el hilo guarda punteros o referencias a variables locales y el hilo no ha finalizado cuando la función acaba.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class Task {
+  int& i;
+  Task(int& i_) : i(i_) {}
+  void operator() () {
+    for(int j=0; j<1000000; ++j) {
+        do_something(i);
+    }
+};
+
+void any_function() {
+  int local_variable = 0;
+  Task my_task(local_variable);
+  std::thread my_thread(my_task);
+  my_thread.detach();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_local_var]: Un hilo usando una referencia a una variable local de la función que llama]
+
+En este caso, el nuevo objeto `my_task` se guarda la referencia a la variable local `local_variable` de la función que crea el hilo, y es posible que este hilo aún esté en funcionamiento cuando se cierra la función `any_function`, porque se ha decidido de manera explícita no esperar su finalización llamando a `detach`. Con lo cual, la siguiente llamada a `do_something` tras la destrucción de la función `any_function` intentará acceder a la variable `local_variable` que ya ha sido destruida. Esto sucedería igual con código normal monohilado, permitir que un puntero o referencia a una variable local persista más allá de la finalización de la función nunca es buena idea, pero es mucho más sencillo cometer este error en código multihilado, puesto que no es inmediatamente aparente que esto ha sucedido.
+
+Hilo principal | Nuevo hilo
+:-----------------------------------------------------|:------------------------------------------------------------------------------------
+Construye `my_task` con referencia a `local_variable` | __
+Lanza hilo `my_thread`                                | __
+__                                                    | Arranca
+__                                                    | Se llama a `Task::operator()`
+`my_thread` se detacha                                | En ejecución, `do_something` con referencia a `local_variable`
+`local_variable` se destruye                          | En ejecución, `do_something` con referencia a `local_variable`
+`any_function` finaliza                               | En ejecución, `do_something` con referencia a `local_variable`, *undefined behavior*
+[Table [threads]: Timeline, acceder a una variable local desde un hilo `detached` después de ser destruido]
+
+La solución a este problema es hacer a la función del hilo auto contenida y copiar los datos dentro del hilo en lugar de compartir los datos. Si se usa un objeto *callable* para la función del hilo, entonces el objeto es copiado dentro del hilo, con lo cual, el objeto original se puede destruir inmediatamente. Pero, aun así, hay que ser cauto con objetos que contengan punteros o referencias. En particular, suele ser mala idea crear un hilo dentro de una función que tiene acceso a las variables locales de esa función, a menos que esté garantizado que el hilo acabe antes de que la función lo haga.
+
+### Esperar a que un hilo acabe
+
+Si es necesario esperar a que hilo acabe, se puede hacer llamando a `join()` en la instancia correspondiente de `std::thread`. En el caso de Listing [th_local_var], reemplazar la llamada a `my_thread.detach()` antes de la llave que cierra la función por una llamada a `my_thread.join()` asegurará que el hilo haya acabado su ejecución antes de cerrar la función y por tanto, antes de que las variables locales sean destruidas. En este caso, significa que no tiene mucho sentido lanzar un nuevo hilo, puesto que el primer hilo no estaría realizando nada mientras se ejecuta el segundo hilo. Pero en código real el hilo original podría tener trabajo a realizar o podría haber lanzado múltiples hilos para hacer algo y esperar a que acabasen todos.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::thread my_thread([] {
+    std::cout << "From Thread" << std::endl;
+});
+my_thread.join();
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread]: Join para Esperar que un Hilo Acabe su Ejecución]
+
+`join()` es una técnica simple y de fuerza bruta, o hay que esperar a que un hilo acabe o no. Si se necesita un control más fino sobre como esperar a un hilo, como verificar si un hilo ha finalizado, o esperar solo una determinada cantidad de tiempo, entonces hay que usar mecanismos alternativos como variables de condición y futures. El acto de llamar a `join()` también limpia cualquier espacio de almacenamiento asociado con el hilo, por lo que el objeto `std::thread` deja de estar asociado con el hilo ya finalizado, en realidad, no está asociado con ningún hilo. Por esto, solo se puede llamar a `join()` una vez para un hilo determinado. Una vez se llama a `join()`, el objeto `std::thread` no es *joinable* y la llamada a `joinable()` devuelve *false*.
+
+### Esperar en circunstancias excepcionales
+
+Hay que asegurarse de llamar o bien a `join()` o `detach()` antes de destruir un objeto `std::thread`. Si el hilo se va a dejar en ejecución en segundo plano, sin esperar a su finalización, se suele llamar a `detach()` de manera inmediata una vez el hilo se lanza, así que esto no es un problema. Pero si se quiere esperar a que acabe el hilo, hay que elegir con cuidado donde se llama a `join()`. Esto significa que la llamada a `join()` es susceptible de ser omitida si salta una excepción después de haber lanzado el hilo, pero antes de la llamada a `join()`.
+
+Para evitar que la aplicación termine abruptamente cuando se lance una excepción, hay que manejar este caso con cuidado. En general, si en un caso sin excepciones se quisiera llamar a `join()`, también se debería llamar cuando salta una excepción para evitar problemas de tiempo de vida accidentales.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class Task {
+  int& i;
+  Task(int& i_) : i(i_) {}
+  void operator() () {
+    for(int j=0; j<1000000; ++j) {
+        do_something(i);
+    }
+};
+
+void any_function() {
+  int local_variable = 0;
+  Task my_task(local_variable);
+  std::thread my_thread(my_task);
+  try {
+    do_something_here();
+  }
+  catch (...) {
+    my_thread.join();
+    throw;
+  }
+  my_thread.join();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_except_join]: Manejo de excepciones y `join()`]
+
+Se usa un bloque `try/catch` para asegurar que un hilo con acceso al estado local finaliza antes de que la función se cierre, acabe de manera normal o lo haga con una excepción. Este uso es verboso, y es fácil cometer errores, así que no es la mejor manera. Si es importante asegurar que el hilo acaba antes de que la función finalice (porque tenga una referencia a una variable local o por cualquier otra razón), entonces es importante asegurar que este sea el caso en todos los posibles caminos de salida, sean normales o con excepciones, y se debería tener un mecanismo simple y conciso para ello.
+
+Una manera de solucionarlo es usar el `idiom` `RAII` `Resource Acquisition Is Initialization` y crear una clase que ejecute el `join()` en el destructor.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class thread_guard {
+  private:
+    std::thread& t;
+  public:
+    explicit thread_guard(std::thread& t_) : t(t_) {}
+    ~thread_guard() {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    thread_guard(thread_guard const&) = delete;
+    thread_guard& operator=(thread_guard const&) = delete;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_guard]: Clase `wrapper` aplicando `RAII` y `join()`]
+
+El uso de esta clase que envuelve este comportamiento es mucho más simple y limpio.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class Task {
+  int& i;
+  Task(int& i_) : i(i_) {}
+  void operator() () {
+    for(int j=0; j<1000000; ++j) {
+        do_something(i);
+    }
+};
+
+void any_function() {
+  int local_variable = 0;
+  Task my_task(local_variable);
+  std::thread my_thread(my_task);
+  thread_guard my_guard(my_thread);
+  do_something_here();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_except_guard]: Uso de la clase `thread_guard`]
+
+Cuando la ejecución del hilo principal llega al final de la función `any_function`, los objetos locales son destruidos en orden inverso a la construcción. Por tanto, el objeto `thread_guard` `my_guard` es destruido el primero, y el hilo entonces recibe la llamada de `join()` en el destructor de esta clase. Esto suceden en cualquier contexto, incluso si la función `any_function` acaba porque en algún sitio de su ejecución se lanza una excepción.
+
+El destructor de la clase `thread_guard` primero comprueba si el objeto `std::thread` es `joinable()` antes de llamar a `join()`. Esto es importante, puesto que `join()` solo puede ser llamado una vez para un hilo de ejecución, sería un error hacerlo sobre un hilo que ya haya recibido esa llamada antes.
+
+El constructor de copia y de asignación se han marcado como `= delete` para asegurar que el compilador no añade unos por defecto. Copiar o asignar un objeto como este sería peligroso, puesto que podría sobrevivir al ámbito del hilo. Al declararlos como `delete`, cualquier intento de copiar un objeto `thread_object` generará un error de compilación.
+
+Si no se necesita esperar a que un hilo finalice, se puede evitar todo este problema simplemente llamando a `detach()`. Esto rompe la asociación del hilo con el objeto `std::thread` y asegura que `std::thread` no será llamada cuando el objeto `std::thread` sea destruido, aunque el hilo aun esté en ejecución en segundo plano.
+
+### Ejecutando hilos en *background*
+
+Llamar a `detach()` sobre un objeto `std::thread` deja al hilo ejecutándose en segundo plano, sin ningún medio de comunicarse con él. No es posible esperarse a que ese hilo se complete, si un hilo se desconecta, ya no se puede obtener un objeto `std::thread` que haga referencia a él, y por tanto, no se puede llamar a `join()` sobre ese hilo. Los hilos que se han desconectado se ejecutan en *background*, la propiedad sobre ellos y su control se pasa al runtime de C++, lo cual asegura que los recursos asociados con el hilo son correctamente reclamados cuando el hilo acaba.
+
+Estos hilos típicamente están en ejecución por casi el total del tiempo que la aplicación está viva, haciendo tareas de segundo plano, como monitorizar el sistema de ficheros, limpiar cosas innecesarias en caches, u optimizando estructuras de datos.
+
+Para desconectar un hilo se llama a `detach()` del objeto `std::thread`, y después de ello el objeto ya no está asociado con el hilo de ejecución y no es `joinable()`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::thread my_thread([] {
+    std::cout << "From Thread" << std::endl;
+});
+my_thread.detach();
+assert(!my_thread.joinable());
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [thread]: Dejar un hilo ejecutándose en segundo plano]
+
+Para desconectar un hilo de un objeto `std::thread` debe haber un hilo que desconectar, no se puede llamar a `detach()` sobre un objeto `std::thread` sin un hilo de ejecución asociado. Es el mismo requisito para `join()`, y se puede verificar de la misma manera, solo se puede llamar a `detach()` para un objeto `std::thread` si `joinable()` devuelve true.
+
+En una aplicación como un procesador de textos se suelen tener varias ventanas independientes, donde en cada una de ellas se está editando un documento distinto. Pese a que esas ventanas puedan parecer independientes, cada una con sus propios menús, se están ejecutando dentro de la misma instancia de la aplicación. Una forma de manejar esto internamente es ejecutar cada ventana de edición de un documento en su propio hilo. Cada hilo ejecuta el mismo código pero con diferentes datos, relativos al documento que se está editando y las correspondientes propiedades de esa ventana. Por tanto, abrir un nuevo documento requiere lanzar un nuevo hilo. El hilo principal que maneja la petición no va a necesitar esperar a que acabe cualquier otro hilo, porque está trabajando en un documento diferente, así que es un buen candidato a ser ejecutado en un hilo desconectado.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void edit_document(std::string const& filename) {
+  open_document_and_display_gui(filename);
+  while (!done_editing()) {
+    user_command cmd = get_user_input();
+    if (cmd.type == open_new_document) {
+        std::string const new_name = get_filename_from_user();
+        std::thread t(edit_document, new_name);
+        t.detach();
+    } else {
+        process_user_input(cmd);
+    }
+  }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_sample]: Ejemplo de desconectar hilos]
+
+Si el usuario elige abrir un nuevo documento, se le pregunta por el documento a abrir, se lanza un nuevo hilo que lo abra y luego se deja en segundo plano. Puesto que el nuevo hilo está realizando la misma operación que el hilo principal pero sobre un fichero distinto, se puede reusar la misma función `edit_document` con el nuevo nombre de fichero como argumento.
+
+## Pasar argumentos a un hilo
+
+Pasar argumentos al objeto *callable* o función es tan simple como pasar argumentos adicionales al constructor de `std::thread`. Pero es importante tener en mente que por defecto los argumentos se copian en el almacenamiento interno, donde pueden ser accedidos por el hilo de ejecución recientemente creado, y entonces se pasan al objeto *callable* o función como *rvalues* como si fueran temporales. Esto se hace incluso si el correspondiente parámetro en la función está esperando una referencia.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void function(int i, const std::string& s);
+
+std:thread my_thread(function, 3, "Hello");
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_args]: Envío de parámetros a un hilo]
+
+Esto crea un nuevo hilo de ejecución asociado con `my_thread`, que llama `function(3, "Hello")`. Aunque `function` recibe un `std::string` como segundo parámetro, el string literal es pasado como un `char const*` y convertido a `std::string` solo en el contexto del nuevo hilo. Esto es importante cuando el argumento aportado es un puntero a una variable automática.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void thread_function(int i, const std::string& s);
+
+void main_function(int some_param) {
+  char buffer[1024];
+  sprintf(buffer, "%i", some_param);
+  std:thread my_thread(thread_function, 3, buffer);
+  my_thread.detach();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_args]: Envío de parámetros a un hilo con casting implícito]
+
+En este caso, es el puntero a la variable local `buffer` el que se pasa al nuevo hilo, y hay una probabilidad muy alta que la función `main_function` se cierre antes de que el `buffer` se haya convertido a un `std::string` en el nuevo hilo, llevando una vez más a un `undefined behavior`. La solución es castear a `std::string` antes de pasar el `buffer` al constructor de `std::thread`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void main_function(int some_param) {
+  char buffer[1024];
+  sprintf(buffer, "%i", some_param);
+  std:thread my_thread(thread_function, 3, std::string(buffer));
+  my_thread.detach();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_args]: Envío de parámetros a un hilo con casting explícito]
+
+En este caso, el problema es que se estaba confiando en la conversión implícita del puntero al `buffer` al objeto `std::string` que se espera como parámetro de la función, pero esta conversión se realiza demasiado tarde, puesto que el constructor de `std::thread` copia los valores suministrados tal cual, sin convertirlos al tipo del parámetro esperado.
+
+No es posible llegar al escenario inverso, el objeto es copiado y se quería una referencia `non-const`, esto no compilaría. Se podría intentar estar si el hilo estuviera actualizando una estructura de datos que se ha pasado por referencia.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void update_data_for_widget(widget_id w, widget_data& data);
+
+void main_function(widget_id w) {
+    widget_data data;
+    std::thread my_thread(update_data_for_widget, w, data);
+    display_status();
+    my_thread.join();
+    process_widget_data(data);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_args]: Envío de parámetros a un hilo con casting explícito]
+
+A pesar que `update_data_for_widget` espera que el segundo parámetro se le pase por referencia, el constructor de `std::thread` no lo sabe, es ajeno a los tipos de los parámetros esperados por la función y copia los correspondientes valores ciegamente. Pero el código interno pasa los argumentos copiados como `rvalues` para trabajar con tipos `move only`, que solo se mueven. Y entonces trata de llamar a `update_data_for_widget` con un `rvalue`. Esto no compila puesto que no pasar un `rvalue` a una función que espera una referencia `non-const`. La solución pasa por envolver los parámetros que necesitan ser referencias en un `std::ref`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::thread my_thread(update_data_for_widget, w, std::ref(data));
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_args]: Envío de parámetros a un hilo con referencia]
+
+De esta manera, la función `update_data_for_widget` recibirá una referencia correcta a `data` en lugar de una copia temporal de `data`, y el código compilará correctamente.
+
+Se puede pasar incluso un puntero a una función miembro de una clase, siempre que se proporcione un objeto puntero adecuado como primer argumento al construir un `std::thread`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class X {
+  public:
+    void do_something_long():
+};
+
+X my_x;
+std::thread my_thread(&X::do_something_long, &my_x);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_args]: Lanzar hilo con puntero a función miembro]
+
+Esto llamará a `my_x.do_something_long()` en el nuevo hilo, puesto que la dirección de `my_x` se pasa como el puntero al objeto en el segundo parámetro, que se le pasará como primer parámetro a `do_something_long()` en forma de `this`. Se le pueden pasar más parámetros a una función miembro, el tercer parámetro del constructor de `std::thread` será el primer parámetro para ella.
+
+Otro escenario interesante del paso de argumentos es cuando estos parámetros no pueden ser copiados, si no sólo movidos. Los datos que contiene un objeto se transfieren a otro, dejando el objeto original vacío. Un ejemplo de esto es `std::unique_ptr`, que proporciona la gestión automática de memoria para objetos creados dinámicamente. Solo una instancia de `std::unique_ptr` puede apuntar a un objeto a la vez, y cuando esta instancia se destruye, el objeto apuntado se elimina. El *move constructor* y el operador de asignación *move* permiten la transferencia de la propiedad de un objeto entre instancias de `std::unique_ptr`, esto se llama *move semantics*. Una transferencia de este tipo deja al objeto original con un puntero a `NULL`. Este movimiento de valores permite a objetos de este tipo que sean aceptados como parámetros de función o devueltos por funciones. Donde el objeto original es temporal, el movimiento es automático, pero donde el original es un *l value*, es decir, un objeto con nombre no temporal, la transferencia debe hacerse directamente invocando a `std::move`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void process_big_object(std::unique_ptr<big_object>);
+
+std::unique_ptr<big_object> p(new big_object);
+p->prepare_data(42);
+
+std::thread my_thread(process_big_object, std::move(p));
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_move]: Mover un objeto en un `unique_ptr` al pasarlo como parámetro a un hilo]
+
+Especificando `std::move(p)` en el constructor de `std::thread`, la propiedad sobre el `big_object` `p` se transfiere primero al almacenamiento interno para el nuevo hilo y después a la función `process_big_object`.
+
+Muchas clases de la librería standard de C++ muestran esta misma semántica para la transferencia de la propiedad como `std::unique_ptr`, y `std::thread` es una de ellas. A pesar que las instancias de `std::thread` no tienen la propiedad de un objeto dinámico de la misma manera que lo hace `std::thread`, sí que tienen propiedad sobre un recurso, cada instancia es responsable de gestionar un hilo de ejecución. Esta propiedad puede ser transferida entre instancias, puesto que las instancias de `std::thread` se pueden mover, pero no se pueden copiar. Esto asegura que solo un objeto esté asociado con un determinado hilo de ejecución en un momento determinado, y aún así permite a los programadores transferir la propiedad entre objetos.
+
+## Transferir la propiedad de un hilo
+
+En muchos casos prácticos es importante tener la capacidad de transferir la propiedad de un objeto. Por ejemplo, una función que crea un hilo en segundo plano, pero le quiere pasar el nuevo hilo a la función que la llamo, o quizás lo contrario, crear un hilo y pasarlo a otra función que sea la que se espere a que acabe.
+
+El soporte para realizar operaciones de movimiento o `move semantics` aplican a `std:thread` para dar soporte a estos escenarios. En la librería standard de C++ hay muchos casos de tipos que gestionan recursos que son movibles pero no copiables, como `std::unique_ptr` o `std::ifstream`,... Esto quiere decir que la propiedad de un hilo de ejecución en particular puede moverse entre distintas instancias de `std::thread`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void func_01();
+void func_02();
+
+std::thread t1(func_01);
+std::thread t2 = std::move(t1);
+t1 = std::thread(func_02);
+std::thread t3;
+t3 = std::move(t2);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_move2]: Mover hilos en ejecución entre `std::thread`]
+
+En Listing [th_move2] primero se lanza un hilo asociado con `t1`. La propiedad de este hilo es luego transferida a `t2` cuando se construye t2, llamando a `std::move()` para mover de manera explicita la propiedad. En este punto, `t1` no tiene asociado ningún hilo de ejecución, el hilo que está ejecutando `func_01` está ahora asociado con `t2`.
+
+Luego se lanza otro hilo y se asocia con un objeto `std::thread` temporal, un `rvalue`. La siguiente transferencia de propiedad hacia `t1` no requiere ninguna llamada a `std::move()` para mover esta propiedad de manera explicita puesto que el propietario es un objeto temporal, el movimiento desde objetos temporales es automático e implícito.
+
+`t3` se construye por defecto sin ningún hilo asociado. La propiedad de hilo asociado con `t2` se transfiere a `t3`, con una llamada explícita a `std::move()`, puesto que `t2` es un objeto con nombre, un `lvalue`. Tras todos estos movimientos, `t1` está asociado con el hilo ejecutando `func_02`, `t2` no tiene ningún hilo asociado, y `t3` está asociado con el hilo ejecutando `func_01`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+t1 = std::move(t3);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_move3]: Movimiento ilegal]
+
+Si en este punto se intenta transferir la propiedad del hilo ejecutando `func_01` de vuelta a `t1` donde empezó habría un problema. Puesto que `t1` ya está asociado con otro hilo de ejecución, ejecutando `func_02`, y se llamaría a `std::terminate` para cerrar la aplicación. Esto es así para preservar la consistencia con el destructor de `std::thread`. De manera explícita hay que esperar a que acabe un hilo o dejarlo en segundo plano antes de su destrucción, y lo mismo aplica a la asignación, no se puede abandonar un hilo asignando un nuevo valor al `std::thread` que lo está gestionando.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::thread func_01() {
+  void something_to_do();
+  return std::thread(something_to_do);
+}
+
+std::thread func_02() {
+  void something_to_do_02();
+  std::thread t(something_to_do_02);
+  return t;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_return]: Devolver un hilo desde una función]
+
+El soporte para operaciones de movimiento de `std::thread` implica que la propiedad de un hilo se puede pasar fuera de una función fácilmente.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void func_01(std::thread);
+
+void func_02() {
+  void something_to_do();
+  func_01(std::thread(something_to_do));
+
+  std::thread t(something_to_do);
+  func_01(std::move(t));
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_in_param]: Pasar un hilo a una función]
+
+Y de manera similar, si la propiedad hay que transferirla hacia una función, puede aceptar una instancia de `std::thread` por valor como uno de los parámetros.
+
+Una ventaja del soporte para `move semantics` de `std::thread` es que, por ejemplo, se puede construir a partir de la clase `thread_guard` Listing [th_guard] y ampliarla para que tome propiedad del hilo. Esto evita cualquier consecuencia no deseada si el objeto `thread_guard` sobrevive al hilo que estaba referenciando, y también evita que nadie pueda hacer `join` o `detach` al hilo una vez la propiedad ha sido transferida dentro del objeto.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class scoped_thread {
+  private:
+    std::thread t;
+  public:
+    explicit scoped_thread(std::thread t_) :
+      t(std::move(t_)) {
+        if (!t.joinable())
+          throw std::logic_error("No Thread");
+      }
+
+    ~scoped_thread() {
+        t.join();
+    }
+
+    scoped_thread(scoped_thread const&) = delete;
+    scoped_thread& operator=(scoped_thread const&) = delete;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_scoped]: Clase `wrapper` aplicando `RAII` para adquirir propiedad del hilo]
+
+La principal diferencia con la clase `thread_guard` es que ahora no se guarda una referencia dentro del objeto, si no el hilo en sí con la propiedad transferida en el constructor.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+class Task {
+  int& i;
+  Task(int& i_) : i(i_) {}
+  void operator() () {
+    for(int j=0; j<1000000; ++j) {
+        do_something(i);
+    }
+};
+
+void any_function() {
+  int local_variable = 0;
+  scoped_thread t{std::thread(Task(local_variable))};
+  do_something_here();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_use_scoped]: Uso de la clase `scoped_thread`]
+
+Ahora el nuevo hilo se pasa directamente a `scoped_thread` sin tener que crear una variable propia para ello. Cuando el hilo inicial alcanza el final de la función `any_function`, el objeto `scoped_thread` es destruido y entonces hace el `join()` al hilo que se le pasó en el constructor. En el destructor también se podría verificar si el hilo aún es `joinable` y lanzar una excepción si no lo fuera.
+
+En el standard de C++ 20 se amplió la librería de hilos para incluir un nuevo tipo de hilo `std::jthread` que se comporta de esta manera, automáticamente hace el `join()` en el destructor si aún sigue siendo `joinable`.
+
+Este soporte para `move semantics` permite también que existan objetos contenedores de `std::thread`, si esos contenedores funcionan también con `move semantics`, como por ejemplo `std::vector<>`. De esta manera, se puede escribir código que lanza varios hilos y espera a que todos finalicen.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void do_something(uint32_t id);
+
+void func() {
+  std::vector<std::thread> threads;
+
+  for (uint8_t i=0; i<20; ++i)
+    threads.emplace_back(do_something, i);
+
+  for (auto& entry:threads)
+    entry.join();
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_vector]: Uso de `std::vector<>` con hilos]
+
+Si los hilos se usan para subdividir el trabajo de un algoritmo, se debe esperar a que todos los hilos hayan finalizado antes de devolver el control a la función que llamó. En este ejemplo, está implícito que el trabajo realizado por los hilos es auto contenido, y el resultado de sus operaciones son efectos colaterales en los datos compartidos entre ellos. Si la función `func()` tuviera que devolver algún valor al que la llama que dependiera de los resultados de las operaciones ejecutadas por esos hilos, este valor de retorno tendría que ser determinado examinando los datos compartidos una vez todos los hilos hayan terminado.
+
+El poner objetos `std::thread` en un `std::vector` es un paso adelante en automatizar la gestión de esos hilos, en lugar de ir creando variables separadas para esos hilos e ir llamando a `join()` directamente, se pueden tratar como un grupo. Incluso se pueden crear de manera dinámica en función de las necesidades del algoritmo en tiempo de ejecución.
+
+## Elegir el número de hilos en tiempo de ejecución
+
+La función de la *STL* `std::thread::hardware_concurrency()` devuelve una indicación del número de hilos que se pueden ejecutar realmente de manera concurrente para una ejecución de un programa, en un sistema multi-núcleo puede ser el número de núcleos. Esto es solo una pista, y la función puede devolver 0 si esta información no está disponible, pero puede ser una guía útil para dividir una tarea entre hilos.
+
+## Identificar hilos
+
+Los identificadores de los hilos son del tipo `std::thread::id`, y se pueden obtener de dos maneras. La primera es a través del objeto `std::thread` asociado al hilo, llamando a la función `get_id()`. Si ese objeto no tiene ningún hilo de ejecución asociado, entonces devolverá un objeto `std::thread::id` por defecto, que indica que no hay ningún hilo. La segunda es desde el propio hilo, se puede llamar a `std::this_thread::get_id()`, para conseguir el identificador del propio hilo.
+
+Los objetos de tipo `std::thread::id` se pueden copiar y comparar libremente, de lo contrario no servirían para mucho. Si dos objetos de tipo `std::thread::id` son iguales, entonces representan al mismo hilo, o ambos tienen el valor por defecto de no hilo asociado. Si dos objetos no son iguales entonces representan a hilos distintos, o uno representa a un hilo y el otro al valor por defecto de no hilo asociado.
+
+Aparte de comparar si los identificadores de hilo son iguales o no, los objetos de tipo `std::thread::id` tienen un conjunto completo de operaciones de comparación, que permiten ordenar todos los valores posibles. Esto permite que sean usados como claves en contenedores asociativos, ordenados o comparados en cualquier manera posible. Estos operadores de comparación ofrecen un ordenamiento completo para todos los valores no iguales de `std::thread::id`, así que se comportan de manera normal, si a < b y b < c entonces a < c,... Se pueden crear claves `hash` con ellos que permiten usarlos como claves en contenedores asociativos no ordenados, con `std::hash<std::thread::id>`.
+
+Algunas veces se suele verificar si un hilo necesita realizar alguna operación usando estas instancias de `std::thread::id`. Por ejemplo, si usan varios hilos para dividir un trabajo, el hilo inicial que lanza a los otros puede necesitar ajustar ligeramente el algoritmo mientras se está desarrollando. En este caso, podría almacenar el resultado de `std::this_thread::get_id()` antes de lanzar a los otros hilos, y en la parte central del algoritmo (el cual es código común para todos los hilos) se podría verificar contra el propio id del hilo en ejecución y ejecutar alguna rama distinta del algoritmo.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::thread::id master_thread;
+
+void core_part_algorithm() {
+    if (std::this_thread::get_id() == master_thread) {
+        do_master_work();
+    } else {
+        do_common_work();
+    }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_core]: Uso de `std::thread::id`]
+
+Incluso se podría guardar en una estructura de datos el `std::thread::id` del hilo actual como parte de una operación. Más tarde, en otras operaciones sobre la misma estructura de datos, se puede comparar el id del hilo que ejecuta ésta última operación contra el id del hilo que creó esa estructura de datos para quizás permitir ciertas operaciones.
+
+De manera similar, estos ids de los hilos se pueden usar como claves en contenedores asociativos donde algunos datos específicos tienen que estar asociados con un hilo, y mecanismos alternativos, como el almacenamiento local para el hilo no son apropiados. Un contenedor de este tipo, podría ser usado, por ejemplo, por un hilo controlador para almacenar información sobre cada uno de los hilos bajo su control para pasar información entre los hilos.
+
+La idea es que `std::thread::id` sea suficiente como identificador genérico de un hilo en la mayoría de las circunstancias, solo si el identificador tiene significado asociado con él (como ser un índice en un vector) estas alternativas pueden ser suficientes.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::cout(std::this_thread::get_id())
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [th_id]: Escritura de `std::thread::id` por la salida standard]
+
+Incluso se puede escribir una instancia de `std::thread::id` por la salida standard con `std::cout`. La salida exacta que se obtiene es totalmente dependiente de la implementación del compilador de C++ que se esté usando. La única garantía que asegura el standard de C++ es que los ids de hilos que se comparan como iguales deberían producir las mismas salidas, y los que son distintos no. Es útil para depurar, pero los valores que se obtienen no tienen ningún sentido semántico.
+
+<link rel="stylesheet" href="res/md/viu.css">
+<style class="fallback">body{visibility:hidden}</style><script>markdeepOptions={tocStyle:'long'};</script>
+<!-- Markdeep: --><script src="res/md/markdeep.min.js?" charset="utf-8"></script>

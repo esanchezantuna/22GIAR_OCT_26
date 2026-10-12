@@ -1,0 +1,908 @@
+<meta charset="utf-8">
+**22GIAR - 005 - Sincronizando Operaciones**
+    <small>©2026 VIU - 22GIAR Programación Concurrente, Distribuida y Paralela - Iván Fuertes</small>
+
+# Introducción
+
+ A veces no se necesita solo proteger los datos, también hay que sincronizar acciones en hilos separados. Un hilo puede necesitar esperar a que otro finalice una tarea antes de que el primero pueda completar la suya. En general, es habitual querer que un hilo espere a un evento específico o a que una condición sea cierta. A pesar de que sería posible hacer esto verificando de manera periódica que algún *flag* almacenado en los datos compartidos cambien su valor, no es lo ideal. La necesidad de sincronizar operaciones entre hilos es algo tan habitual que la librería standard de C++ ofrece algunos sistemas para manejarlo, en forma de *variables de condición* y *futures*.
+
+# Esperando a un evento u otra condición
+
+Si un hilo está esperando a que un segundo hilo complete una tarea, tiene varias opciones para manejar esta situación. La primera, podría ir verificando un `flag` de vez en cuando en los datos compartidos (protegidos con un mutex) y hacer que el segundo hilo cambie el estado del `flag` cuando acabe la tarea. Este sistema malgasta recursos, el hilo consume recursos valiosos verificando de manera repetida el flag, y cuando el mutex está bloqueado por el hilo que espera no puede ser bloqueado por cualquier otro hilo. Ambos van en contra del hilo que espera, si el hilo que espera está en ejecución, esto limita los recursos de ejecución disponibles por el hilo por el cual se está esperando, y mientras que el hilo que espera bloquea el mutex protegiendo el flag para verificarlo, el hilo por el que se está esperando no puede bloquear el mutex para cambiar el valor del flag cuando acaba. De manera similar, el hilo que espera está consumiendo recursos que podrían ser usados por otros hilos en el sistema y puede hacerlos esperar más de lo necesario.
+
+Una segunda opción es hacer que el hilo que espera se vaya a dormir por pequeños periodos de tiempo entre las verificaciones del flag, usando la función `std::this_thread::sleep_for()`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+bool flag;
+std::mutex m;
+
+void wait_for_flag() {
+    std::unique_lock<std::mutex> lk(m);
+    while(!flag) {
+        lk.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        lk.lock();
+    }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [sleep]: Uso de `std::this_thread::sleep_for()` para dormir al hilo]
+
+En el bucle, la función desbloquea el mutex antes de irse a dormir, y lo vuelve a bloquear después para darle la opción a otro hilo a coger el mutex y cambiar el valor del flag.
+
+Esto es una mejora puesto que el hilo ya no malgasta tiempo de procesamiento mientras está durmiendo, pero es difícil encontrar un periodo de tiempo correcto para dormir. Dormir poco tiempo entre las verificaciones supone que el hilo sigue desperdiciando recursos, y dormir demasiado supone que el hilo estará durmiendo aunque la tarea por la que está esperando ya esté finalizada, introduciendo un retraso. Es raro que esta opción de dormir demasiado tenga un impacto directo en el funcionamiento general del programa, pero puede hacer que se pierdan algunos frames en un videojuego, o perderse algún periodo de tiempo relevante en una aplicación en tiempo real.
+
+La tercera y mejor opción es usar los servicios de la librería standard para esperar al propio evento. El mecanismo más básico para esperar a que un evento sea disparado por otro hilo es una *variable de condición*. Conceptualmente, una variable de condición está asociada con un evento u otra condición y uno o más hilos pueden esperar a que dicha condición se cumpla. Cuando un hilo ha determinado que la condición se satisface, entonces puede notificar a uno o más hilos que está esperando en esta variable de condición para despertarlos y permitir que continue su ejecución.
+
+## Esperando a una condición con variables de condición
+
+No se tiene una sino dos implementaciones de una variable de condición en C++, `std::condition_variable` y `std::condition_variable_any`. Ambas están declaradas en la cabecera `<condition_variable>`. En ambos casos, necesitan trabajar con un mutex para realizar una sincronización correcta, la primera implementación está limitada a usar un mutex, mientras que la segunda puede trabajar con cualquier cosa que cumpla los criterios mínimos para parecerse a un mutex, de aquí el sufijo `_any`. Puesto que `std::condition_variable_any` es más general, tiene el potencial para suponer un coste más alto en términos de tiempo, rendimiento o recursos del SO. Por lo tanto, el uso de `std::condition_variable` es mejor idea, a menos que se necesite esa flexibilidad adicional.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::mutex mut;
+std::queue<data_chunk> data_queue;
+std::condition_variable data_cond;
+
+void data_preparation_thread() {
+    while(more_data_to_prepare()) {
+        data_chunk const data = prepare_data();
+        {
+            std::lock_guard<std::mutex> lk(mut);
+            data_queue.push(data);
+        }
+        data_cond.notify_one();
+    }
+}
+
+void data_processing_thread() {
+    while(true) {
+        std::unique_lock<std::mutex> lk(mut);
+        data_cond.wait(lk, []{
+            return !data_queue.empty();
+        });
+        data_chunk data=data_queue.front();
+        data_queue.pop();
+        lk.unlock();
+        process(data);
+        if(is_last_chunk(data))
+            break;
+    }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [cond_var]: Uso de `std::condition_variable`]
+
+Se tiene una cola que se usa para pasar datos entre dos hilos. Cuando los datos están listos, el hilo que prepara los datos bloquea el mutex protegiendo la cola, usando un `std::lock_guard` y mete los datos en la cola. Entonces llama a la función miembro `notfy_one()` de la instancia `std::condition_variable` para notificar al hilo que espera (si es que hay alguno esperando). Se pone el código para introducir los datos a la cola en un *scope* pequeño, así se notifica la variable de condición tras desbloquear el mutex, esto es así para que si el hilo que estás esperando se despierta inmediatamente, no tenga que volver a bloquearse esperando a que se libere el mutex.
+
+En el otro lado, se tiene un hilo que procesa datos. Este hilo primero bloquea el mutex, pero esta vez con un `std::unique_lock` en lugar de un `std::lock_guard`. El hilo entonces llama a `wait()` en la `std::condition_variable`, pasándole el objeto mutex y una función lambda que expresa la condición por la que se quiere esperar. Las funciones lambda permiten escribir funciones anónimas como parte de otra expresión, y están diseñadas para especificar predicados para funciones como esta `wait()`. En este caso, la función lambda `[]{return !data_queue.empty();}` mira si la cola de datos no está vacía, es decir, si hay algún dato en la cola listo para ser procesado.
+
+La implementación de `wait()` verifica la condición (llamando a la función lambda) y devuelve si se cumple (la función lambda ha devuelto un `true`). Si la condición no se satisface (la función lambda ha devuelto `false`), entonces `wait()` desbloquea el mutex y pone al hilo en un estado de espera o de bloqueo. Cuando la variable de condición es notificada por una llamada a `notify_one()` desde el hilo de preparación de datos, el hilo se despierta de su inactividad (se desbloquea), vuelve a adquirir el bloqueo sobre el mutex, y vuelve a verificar la condición, volviendo de la llamada a `wait()` con el mutex bloqueado si la condición se ha cumplido. Si la condición no se ha satisfecho, el hilo desbloquea el mutex y vuelve a la espera. Por eso se necesita un `std::unique_lock` mejor que un `std::lock_guard`, el hilo que espera tiene que desbloquear el mutex mientras está esperando y bloquearlo otra vez después, y `std::lock_guard` no ofrece esa flexibilidad. Si el mutex se mantuviera bloqueado mientras el hilo estaba durmiendo, el hilo de preparación de los datos no sería capaz de bloquear el mutex para añadir un elemento a la cola, y el hilo que espera nunca vería su condición satisfecha.
+
+Se usa una lambda muy sencilla en la espera, que verifica que la cola no esté vacía, pero se le puede pasar cualquier función u objeto que se pueda llamar. Si ya se tiene una función para verificar esa condición (quizás porque sea más complejo que un simple test como este), entonces se puede pasar directamente esta función, no hay necesidad de encapsularla en una lambda. Durante una llamada a `wait()`, una variable de condición puede verificar esa condición cualquier número de veces, pero siempre lo hace con el mutex bloqueado y volverá inmediatamente si y solo si la función que se le suministra para probar la condición devuelve un `true`. Cuando el hilo que espera vuelve a adquirir el mutex y prueba la condición, si no es en respuesta directa a una notificación desde otro hilo, se considera un *falso despertar* (*spurious wake*). Puesto que el número y frecuencia de estos falsos despertares son indeterminados por definición, no se aconseja usar una función con efectos secundarios para la verificación de la condición. Si se hace, estos efectos secundarios pueden ocurrir varias veces.
+
+Fundamentalmente, un `std::condition::variable::wait` es una optimización de una espera activa.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+template<typename Predicate>
+void minimal_wait(std::unique_lock<std::mutex>& lk,Predicate pred){
+    while(!pred()){
+        lk.unlock();
+        lk.lock();
+    }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [cond_var_alt]: Implementación alternativa de `std::condition_variable`]
+
+De hecho, una implementación alternativa puede ser un bucle simple como el de Listing [cond_var_alt], aunque menos eficiente.
+
+El código que use estas variables de condición debe estar preparado para trabajar con una implementación mínima de `wait()` como esta en Listing [cond_var_alt], así como con una implementación que solo se despierte si se llama a `notify_one()` o `notify_all()`.
+
+La flexibilidad para desbloquear un `std::unique_lock` no solo se usa en la llamada a `wait()`, también se usa una vez se tiene los datos para procesar pero antes de procesarlos. Este procesamiento de datos puede ser potencialmente una operación que consuma bastante tiempo, y es mala idea mantener un bloqueo sobre un mutex más tiempo del necesario.
+
+Usar una cola para transferir datos entre varios hilos es un caso habitual. Bien hecho la sincronización puede limitarse a la cola en sí misma, que reduce en mayor medida los problemas de sincronización y condiciones de carrera.
+
+## Construir una cola thread-safe con variables de condición
+
+Si se va a diseñar una cola genérica, vale la pena invertir un tiempo en pensar sobre las operaciones que se van a necesitar.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+template <class T, class Container = std::deque<T> >
+class queue {
+    public:
+        explicit queue(const Container&);
+        explicit queue(Container&& = Container());
+        template <class Alloc> explicit queue(const Alloc&);
+        template <class Alloc> queue(const Container&, const Alloc&);
+        template <class Alloc> queue(Container&&, const Alloc&);
+        template <class Alloc> queue(queue&&, const Alloc&);
+        void swap(queue& q);
+        bool empty() const;
+        size_type size() const;
+        T& front();
+        const T& front() const;
+        T& back();
+        const T& back() const;
+        void push(const T& x);
+        void push(T&& x);
+        void pop();
+        template <class... Args> void emplace(Args&&... args);
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [std::queue]: Interfaz de `std::queue`]
+
+En Listing [std::queue] se puede observar la declaración de la cola `std::queue` de la librería standard de C++. Si se ignoran las operaciones de construcción, asignación y swap, quedan tres grupos de operaciones, las que miran el estado de toda la cola (`empty()` y `size()`), las que piden elementos de la cola (`front()` y `back()`) y las que modifican la cola (`push()`, `pop()` y `emplace()`). Se tienen unas potenciales condiciones de carrera como las vistas en el caso de la pila thread safe. Hay que combinar `front()` y `pop()` en una sola llamada. Además, el código de Listing [cond_var] añade un nuevo matiz, cuando se usa la cola para pasar datos entre hilos, el hilo que recibe suele tener que esperar a los datos. Se pueden introducir dos variantes para `pop()`, `try_pop()`, que intenta sacar el valor de la cola pero siempre devuelve inmediatamente (con una indicación de fallo) incluso aunque no haya ningún dato que recoger, y `wait_and_pop()` que espera hasta que haya un valor para sacar.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <memory>
+
+template<typename T>
+class threadsafe_queue {
+    public:
+        threadsafe_queue();
+        threadsafe_queue(const threadsafe_queue&);
+        threadsafe_queue& operator=(
+        const threadsafe_queue&) = delete;
+
+        void push(T new_value);
+
+        bool try_pop(T& value);
+        std::shared_ptr<T> try_pop();
+        void wait_and_pop(T& value);
+        std::shared_ptr<T> wait_and_pop();
+
+        bool empty() const;
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [threadsafe_queue]: Interfaz de `std::queue` thread safe]
+
+Se han simplificado los constructores y eliminado la asignación para hacer el código más simple. Se han hecho dos versiones de ambas `try_pop()` y `wait_and_pop()`. La primera versión de `try_pop()` almacena el valor obtenido en la variable referenciada, así se puede usar el valor de retorno para ver el estado, devuelve un `true` si ha conseguido un valor, o un `false` si no ha podido. La segunda versión no puede hacer esto, puesto que retorna el valor directamente. Pero el puntero que devuelve puede ser puesto a `NULL` si no hay valor que sacar de la cola.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+
+template<typename T>
+class threadsafe_queue {
+    private:
+        std::mutex mut;
+        std::queue<T> data_queue;
+        std::condition_variable data_cond;
+    public:
+        void push(T new_value) {
+            std::lock_guard<std::mutex> lk(mut);
+            data_queue.push(new_value);
+            data_cond.notify_one();
+        }
+
+        void wait_and_pop(T& value) {
+            std::unique_lock<std::mutex> lk(mut);
+            data_cond.wait(lk,[this]{return !data_queue.empty();});
+            value=data_queue.front();
+            data_queue.pop();
+        }
+};
+
+threadsafe_queue<data_chunk> data_queue;
+void data_preparation_thread() {
+    while(more_data_to_prepare()) {
+        data_chunk const data=prepare_data();
+        data_queue.push(data);
+    }
+}
+
+void data_processing_thread() {
+    while(true) {
+        data_chunk data;
+        data_queue.wait_and_pop(data);
+        process(data);
+        if(is_last_chunk(data))
+            break;
+    }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [threadsafe_queue_1]: Implementación de `threadsafe_queue`, `push` y `wait_and_pop` a partir de Listing [cond_var]]
+
+Basándose en el uso de la cola visto en Listing [cond_var] se infiere la implementación de `push()` y `wait_and_pop()`. El mutex y la variable de condición están ahora dentro de la instancia de `threadsafe_queue`, así que no se necesitan variables separadas, y no hay que realizar ninguna sincronización externa en la llamada a `push()`. De igual manera, `wait_and_pop()` se encarga de la espera sobre la variable de condición.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <queue>
+#include <memory>
+#include <mutex>
+#include <condition_variable>
+
+template<typename T>
+class threadsafe_queue {
+    private:
+        mutable std::mutex mut;
+        std::queue<T> data_queue;
+        std::condition_variable data_cond;
+    public:
+        threadsafe_queue() {}
+        threadsafe_queue(threadsafe_queue const& other) {
+            std::lock_guard<std::mutex> lk(other.mut);
+            data_queue=other.data_queue;
+        }
+
+        void push(T new_value) {
+            std::lock_guard<std::mutex> lk(mut);
+            data_queue.push(new_value);
+            data_cond.notify_one();
+        }
+
+        void wait_and_pop(T& value) {
+            std::unique_lock<std::mutex> lk(mut);
+            data_cond.wait(lk,[this]{return !data_queue.empty();});
+            value=data_queue.front();
+            data_queue.pop();
+        }
+
+        std::shared_ptr<T> wait_and_pop() {
+            std::unique_lock<std::mutex> lk(mut);
+            data_cond.wait(lk,[this]{return !data_queue.empty();});
+            std::shared_ptr<T> res(std::make_shared<T>(data_queue.front()));
+            data_queue.pop();
+            return res;
+        }
+
+        bool try_pop(T& value) {
+            std::lock_guard<std::mutex> lk(mut);
+            if(data_queue.empty())
+                return false;
+            value=data_queue.front();
+            data_queue.pop();
+            return true;
+        }
+
+        std::shared_ptr<T> try_pop() {
+            std::lock_guard<std::mutex> lk(mut);
+            if(data_queue.empty())
+                return std::shared_ptr<T>();
+            std::shared_ptr<T> res(std::make_shared<T>(data_queue.front()));
+            data_queue.pop();
+        return res;
+        }
+
+        bool empty() const {
+            std::lock_guard<std::mutex> lk(mut);
+            return data_queue.empty();
+        }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [threadsafe_queue_2]: Implementación de `threadsafe_queue`]
+
+Aunque la función miembro `empty` está marcada como `const`, igual que el parámetro `other` en el constructor de copia está marcado como referencia `const`, otros hilos pueden tener referencias `non const` al objeto, y estar llamando a funciones miembros `mutables` y aún así hay que seguir bloqueando el mutex. Puesto que bloquear un mutex es una operación `mutable`, el objeto mutex debe ser marcado como tal, para que pueda ser bloqueado desde `empty()` y el constructor de copia.
+
+Las variables de condición son también útiles cuando hay más de un hilo esperando a un evento. Si los hilos se usan para dividir la carga de trabajo y por tanto solo un hilo debe responder a una notificación, se puede usar exactamente la misma estructura en Listing [cond_var], simplemente se lanzan varias instancias del hilo de procesamiento de datos. Cuando los nuevos datos están listos, la llamada a `notify_one()` despertará a uno de los hilos que esté ejecutando `wait()` en ese momento para probar su condición y volver del `wait()` (al añadir un elemento a la cola de datos). No hay ninguna garantía de qué hilo será notificado o siquiera si hay algún hilo esperando a ser notificado, todos los hilos que procesan datos pueden estar todavía ocupados en ese procesamiento.
+
+Otra posibilidad es que muchos hilos estén esperando al mismo evento, y todos necesiten responder. Esto puede suceder cuando los datos compartidos están siendo inicializados, y los datos de procesamiento pueden usar todos los mismos datos pero tienen que esperar a que estén inicializados (a pesar de que hay mejores mecanismos para esto como `std::call_once`), o donde los hilos tienen que esperar a una actualización de los datos compartidos, como una reinicialiación periódica. En estos casos, el hilo que está preparando los datos puede llamar a `notify_all()` sobre la variable de condición en lugar de `notify_one()`. Como sugiere el nombre, esto hace que todos los hilos que están esperando en su llamada a `wait()` que verifiquen la condición por la que están esperando.
+
+Si el hilo que espera solo va a esperar una vez, de tal manera que cuando su condición es `true` nunca esperará otra vez sobre esa variable de condición, quizás esta no sea la mejor opción en cuanto a mecanismos de sincronización. En particular si la condición sobre la que se espera es la inicialización de un trozo concreto de datos, para eso es mejor usar un *future*.
+
+# Esperando eventos únicos con *futures*
+
+Si un hilo necesita esperar a un evento específico que solo va a suceder una vez, de alguna manera puede recibir un *future* que representa a dicho evento. El hilo en ese momento puede esperar periódicamente sobre este *future* por cortos espacios de tiempo para ver si el evento ha ocurrido mientras está realizando otra tarea entre esas verificaciones. Alternativamente, puede hacer otra tarea hasta que necesite que el evento haya sucedido antes de continuar su trabajo y entonces esperar a que el *future* esté completado o listo (`ready`). Un *future* puede tener datos asociados con él o quizás no. Una vez que un evento ha sucedido (y el *future* ha pasado a estar listo) el *future* no se puede resetear.
+
+Hay dos tipos de *futures* en la librería standard de C++, implementados como dos clases templatizadas declaradas en la cabecera `<future>`, *futures únicos* (`std:future<>`) y *futures compartidos* (`std::shared_future<>`). Están diseñados siguiendo las pautas de los `std::unique_ptr<>` y `std::shared::ptr<>`. Una instancia de `std::future` es la única instancia que se refiere a su evento asociado, mientras que múltiples instancias de `std::shared_future` pueden referirse al mismo evento. En este último caso, todas las instancias cambiarán al estado `ready` al mismo tiempo, y todas ellas podrán acceder a los datos asociados con el evento. Estos datos asociados son la razón de que sean clases templatizadas, como `std::unique_ptr` y `std::shared_ptr`, el parámetro templatizado es el tipo de los datos asociados. Las especializaciones `std::future<void>` y `std::shared_ptr<void>` se deben usar cuando no hay datos asociados. A pesar que los *futures* se usan para comunicarse entre hilos, estos objetos en sí mismos no ofrecen acceso sincronizado. Si varios hilos necesitan acceder a un solo objeto *future*, deben proteger este acceso con un mutex u otro mecanismo de sincronización. Pero, varios hilos pueden acceder a su propia copia de `std::shared_future<>` sin usar ningún mecanismo de sincronización, aunque todos se refieran al mismo resultado asíncrono.
+
+Los eventos únicos más básicos pueden ser los que dan el resultado de un cálculo ejecutado en segundo plano. Los `std::thread` no ofrecen ninguna forma simple de devolver un valor desde una tarea, y esto se puede resolver usando *futures*.
+
+## Devolver valores desde hilos en *background*
+
+Se tiene un cálculo que tarda bastante tiempo en ejecución, que se espera que en algún momento produzca un resultado útil pero para el cual aún no se necesita su valor. Se puede lanzar un nuevo hilo para realizar el cálculo, pero eso significa que hay que encargarse de transferir el resultado de vuelta, puesto que `std::thread` no ofrece ningún mecanismo directo para esto. Aquí es donde la función templatizada `std::async` aparece.
+
+Se usa `std:async` para empezar una tarea asíncrona para la cual aún no se necesita el resultado en este momento. En lugar de tener un objeto `std::thread` sobre el cual esperar, `std::async` devuelve un objeto `std::future` que en algún momento recogerá el valor de retorno de la función. Cuando se necesite el valor, se llama a `get()` sobre el *future* y el hilo se bloquea hasta que el *future* está `ready` y devuelve el valor.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <future>
+#include <iostream>
+
+int find_the_answer();
+void do_other_stuff();
+
+int main() {
+    std::future<int> the_answer = std::async(find_the_answer);
+    do_other_stuff();
+    std::cout << "The answer is " << the_answer.get() << std::endl;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [future]: Uso de `std::future` y `std::async`]
+
+`std::async` permite pasar argumentos adicionales a la función añadiendo argumentos extra a la llamada, de igual manera que lo hace `std::thread`. Si el primer argumento es un puntero a una función miembro, el segundo argumento tiene que ser el objeto sobre el cual aplicar la función miembro (o bien directamente, o a través de un puntero, o envuelto en un `std::ref`), y el resto de argumentos se pasan como tal a la función miembro. De otra manera, el segundo y siguientes argumentos se pasan como argumentos a la función u objeto que se puede llamar especificados como primer argumento. Tal como con los `std::thread`, si los argumentos son `rvalues`, se crean copias moviendo a los originales. Esto permite el uso de tipos de solo movimiento tanto como objetos de función como argumentos.
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <string>
+#include <future>
+
+struct X {
+    void foo(int,std::string const&);
+    std::string bar(std::string const&);
+};
+
+    X x;
+    auto f1=std::async(&X::foo,&x,42,"hello");  //llama a p->foo(42,"hello"), donde p es &x
+    auto f2=std::async(&X::bar,x,"goodbye");    //llama a tmpx.bar("goodbye") donde tmpx es una copia de x
+
+struct Y {
+    double operator()(double);
+};
+
+    Y y;
+    auto f3=std::async(Y(),3.141);          //llama a tmpy(3.141) donde tmpy se ha construido moviendo desde Y()
+    auto f4=std::async(std::ref(y),2.718);  //llama a y(2.718)
+    X baz(X&);
+    std::async(baz,std::ref(x));            //llama a baz(x)
+
+class move_only {
+    public:
+        move_only();
+        move_only(move_only&&)
+        move_only(move_only const&) = delete;
+        move_only& operator=(move_only&&);
+        move_only& operator=(move_only const&) = delete;
+        void operator()();
+};
+
+auto f5=std::async(move_only());                //llama a tmp() donde tmp se construye a partir de std::move(move_only())
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [async_args]: Pasar argumentos a una función con `std::async`]
+
+Por defecto, depende de la implementación si `std::async` lanza un nuevo hilo, o si la tarea se ejecuta de manera síncrona cuando se espera el *future*. En la mayoría de los casos esto es lo que se quiere, pero se puede especificar cual usar con un parámetro adicional a `std::async` antes de la llamada a la función. Este parámetro es de tipo `std::launch`, y puede ser `std::launch::deferred` para indicar que la llamada a la función se difiere hasta que se llama a `wait()` o `get()` sobre el *future*, `std::launch::async` para indicar que la función se debe ejecutar en su propio hilo, o `std::launch::deferred | std::launch::async` para indicar que la implementación puede elegir. Esta última opción es la que viene por defecto. Si la llamada a la función se difiere, puede que nunca se llame.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+auto f6 = std::async(std::launch::async,Y(),1.2);    //se ejecuta en un nuevo hilo
+
+auto f7 = std::async(std::launch::deferred,baz,std::ref(x));  //se ejecuta cuando se llama a wait() o get()
+
+auto f8=std::async(                         //decide la implementación
+    std::launch::deferred | std::launch::async,
+    baz,std::ref(x));
+
+auto f9=std::async(baz,std::ref(x));        //decide la implementación
+
+f7.wait();                                  //Invoca la función diferida
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [async_defer]: Uso de cuando lanzar un `std::async`]
+
+El uso de `std::async` facilita dividir algoritmos en tareas que pueden ejecutarse de manera concurrente. Sin embargo, no es la única manera de asociar un `std::future` con una tarea, también se puede hacer encapsulando la tarea con una instancia de la clase templatizada `std::packaged_task<>` o escribiendo código para asignar los valores de manera explícita usando la clase templatizada `std::promise`.
+
+## Asociar una tarea con un *future*
+
+`std::packaged_task<>` vincula un *future* a una función u objeto que se puede llamar. Cuando el objeto `std::packaged_task<>` se invoca, llama a su función asociada y hace que el *future* esté `ready`, con el valor de retorno almacenado como sus datos asociados. Esto se puede usar como un bloque básico para construir *thread pools* u otros esquemas de gestión de tareas. Como ejecutar cada tarea en su propio hilo, o ejecutarlas todas secuencialmente en un hilo en segundo plano en particular. Si una operación grande se puede dividir en sub tareas auto contenidas, cada una de estas puede ser envuelta en una instancia de `std::packaged_task<>`, y entonces esa instancia se puede pasar al programador de tareas o *thread pool*. Esto abstrae los detalles de las tareas, el programador solo trabaja con instancias de `std::packaged_task<>` en lugar de funciones individuales.
+
+El parámetro del template de la clase `std::packaged_task<>` es una firma de función, como `void()` para una función que no recibe parámetros sin valor de retorno, o `int(std::string&, double*)` para una función que recibe una referencia `non const` a un `std::string` y un puntero a un `double` y devuelve un `int`. Cuando se construye una instancia de `std::packaged_task` se debe pasar una función u objeto que se puede llamar que pueda aceptar los parámetros especificados y devolver un tipo que se pueda convertir al tipo de retorno especificado. Los tipos no tienen que encajar exactamente, se puede construir un `std::package_task<double(double)>` a partir de una función que recibe un `int` y devuelve un `float` puesto que esos tipos se pueden convertir de manera implícita.
+
+El tipo de retorno de la firma de la función especificada identifica el tipo del `std::future<>` que se devuelve desde la función miembro `get_future()`, mientras que la lista de argumentos de la firma de la función se usa para especificar la firma del operador de llamada de la función de la tarea empaquetada.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+template<>
+class packaged_task<std::string(std::vector<char>*,int)> {
+    public:
+        template<typename Callable>
+            explicit packaged_task(Callable&& f);
+        std::future<std::string> get_future();
+        void operator()(std::vector<char>*,int);
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [packaged_task]: Definición de clase parcial para `std::packaged_task<std::string(std::vector<char>*, int)>`]
+
+El objeto `std::packaged_task` es un objeto que se puede llamar, y se puede encapsular en un objeto `std::function`, se puede pasar a un `std::thread` como la función del hilo, se puede pasar a otra función que necesite un objeto que se pueda llamar, o incluso invocado directamente. Cuando se invoca a un `std::packaged_task` como objeto función, los argumentos suministrados al operador de llamada se pasan a la función contenida, y el valor de retorno se almacena como el resultado asíncrono en el `std::future` que se obtiene desde `get_future()`. Así que se puede encapsular una tarea en un `std::packaged_task` y obtener el *future* antes de pasar el objeto `std::packaged_task` a cualquier otro sitio para que se invoque a su debido tiempo. Cuando se necesita el resultado, se puede esperar a que el *future* esté `ready`.
+
+### Pasar tareas entre hilos
+
+Muchos frameworks de interfaz gráfica obligan a actualizar dicho interfaz gráfico desde hilos específicos, así que si otro hilo necesita actualizar esta interfaz gráfica, debe enviar un mensaje al hilo correcto para hacerlo. `std::package_task` ofrece una manera de hacerlo sin necesitar un mensaje personalizado para cada una de las actividades relacionadas con el interfaz gráfico.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <deque>
+#include <mutex>
+#include <future>
+#include <thread>
+#include <utility>
+
+std::mutex m;
+std::deque<std::packaged_task<void()> > tasks;
+
+bool gui_shutdown_message_received();
+void get_and_process_gui_message();
+
+void gui_thread() {
+    while(!gui_shutdown_message_received()) {
+        get_and_process_gui_message();
+        std::packaged_task<void()> task;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            if(tasks.empty())
+                continue;
+            task = std::move(tasks.front());
+            tasks.pop_front();
+        }
+        task();
+    }
+}
+
+std::thread gui_bg_thread(gui_thread);
+
+template<typename Func>
+std::future<void> post_task_for_gui_thread(Func f) {
+    std::packaged_task<void()> task(f);
+    std::future<void> res=task.get_future();
+    std::lock_guard<std::mutex> lk(m);
+    tasks.push_back(std::move(task));
+    return res;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [packaged_task_gui]: Ejecutar código en un hilo de interfaz gráfico usando `std::packaged_task<>`]
+
+El hilo del interfaz gráfico está dentro de un bucle infinito hasta que se recibe un mensaje diciendo que se debe cerrar, está continuamente sondeando (*polling*) los mensajes que llegan desde la interfaz gráfica para atenderlos, como clicks del ratón del usuario, y ejecutando tareas de la cola de tareas. Si no hay tareas en la cola, vuelve al bucle, en caso contrario, extrae una tarea de la cola, libera el mutex sobre la cola, y ejecuta la tarea. El *future* asociado con la tarea se hará `ready` cuando la tarea se complete.
+
+Enviar una tarea a la cola es simple, una nueva tarea empaquetada se crea a partir de la función suministrada, se obtiene el *future* de esta tarea llamando a `get_future()` y la tarea se pone en la cola antes de devolver el *future* a quien llamó. El código que envió el mensaje al hilo del interfaz gráfico puede entonces esperar al *future* si necesita saber que la tarea se ha completado, o lo puede descartar en el futuro si no lo necesita saber.
+
+Este ejemplo usa `std::packaged_task<void()>` para las tareas, que encapsula una función u otro objeto que se pueda llamar que no recibe parámetros y devuelve `void` (si devuelve otra cosa, este valor de retorno se descarta). Esta es la tarea más simple posible, pero se pueden usar en situaciones más complejas, especificando una firma de función distinta en el parámetro del template, se puede cambiar el tipo de retorno (y así el tipo de dato almacenado en el estado del *future* asociado) y también los tipos de argumento del operador de llamada a función. Este ejemplo se puede extender para permitir que las tareas que se ejecutan en el hilo del interfaz gráfico acepten argumentos y devuelvan un valor en el `std::future` en lugar de solo un indicador de finalización.
+
+## Haciendo *promesas*
+
+¿Y que pasa con aquellas tareas que no se pueden expresar como una simple llamada a función o aquellas donde el resultado puede venir de más de un sitio? Estos casos se pueden resolver usando la tercera manera de crear un *future*, usar `std::promise` para asignar el valor de manera explícita.
+
+Cuando se tiene una aplicación que necesita manejar muchas conexiones de red, es tentador manejar cada conexión en un hilo separado, y así hacer que la comunicación por red sea más fácil de diseñar y programar. Esto funciona bien para un número bajo de conexiones (y por tanto, un bajo número de hilos). Por desgracia, al incrementarse el número de conexiones, esto ya no funciona tan bien, un número alto de hilos consumen muchos recursos del sistema operativo y pueden causar muchos cambios de contexto (cuando el número de hilos sobrepasa la capacidad hardware de concurrencia) impactando en el rendimiento. En casos extremos, el sistema operativo puede quedarse sin recursos para ejecutar nuevos hilos antes de acabar con sus capacidades para recibir conexiones de red. En aplicaciones con muchas conexiones de red, por lo tanto, es común tener un número pequeño de hilos (quizás solo uno) manejando las conexiones, con cada hilo gestionando varias conexiones a la vez.
+
+En uno de esos hilos que manejan las conexiones, los paquetes de datos llegan desde las diversas conexiones que se gestionan de manera aleatoria, y de igual manera, los paquetes de datos para enviar se encolan para ser enviados en orden aleatorio. En muchos casos, otras partes de la aplicación estarán o bien esperando que se envíen datos con éxito o bien esperando a recibir un nuevo lote de datos desde alguna conexión de red específica.
+
+`std::promise<T>` ofrece una manera de asignar un valor (de tipo `T`) que puede ser leído más tarde a través de un objeto `std::future<T>` asociado. La pareja `std::promise / std::future` ofrece un mecanismo para esta función, el hilo en espera podría bloquearse sobre el *future*, mientras que el hilo que proporciona los datos podría usar la *promise* para establecer el valor asociado y hacer que el *future* pasara a `ready`.
+
+Se puede obtener el objeto asociado `std::future` con una `std::promise` llamando a `get_future()`, tal como sucedía con `std::packaged_task`. Cuando se asigna el valor de la *promise* (usando la función miembro `set_value()`), el *future* pasa a estar `ready` y se puede usar para recoger el valor almacenado. Si se destruye el objeto `std::promise` sin asignar un valor, se almacena una excepción en su lugar.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <future>
+
+void process_connections(connection_set& connections) {
+    while(!done(connections)) {
+        for(connection_iterator connection=connections.begin(),end=connections.end();
+            connection!=end; ++connection) {
+                if(connection->has_incoming_data()) {
+                    data_packet data = connection->incoming();
+                    std::promise<payload_type>& p = connection->get_promise(data.id);
+                    p.set_value(data.payload);
+                }
+
+                if(connection->has_outgoing_data()) {
+                    outgoing_packet data = connection->top_of_outgoing_queue();
+                    connection->send(data.payload);
+                    data.promise.set_value(true);
+                }
+        }
+    }
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [promises]: Manejar varias conexiones desde un solo hilo usando `std::promise`]
+
+La función `process_connections` está en un bucle hasta que la llamada a `done()` devuelve un `true`. Cada vez que itera sobre el bucle, verifica cada conexión dentro del bucle `for`, obteniendo datos de entrada si los hay o enviando datos de salida encolados. Aquí se asume que un paquete de entrada lleva un identificador y un *payload* con los datos dentro. El identificador se mapea a un `std::promise` (quizás a través de una búsqueda en un contenedor asociativo), y el valor se asigna con la carga del paquete. Para los paquetes de salida, el paquete se obtiene de la cola de salida y se envía a través de la conexión. Una vez se ha completado el envío, la *promise* asociada con los datos de salida se asigna a `true` para indicar que se ha enviado con éxito. El que esta solución encaje con el protocolo de red depende del propio protocolo, esta estructura de *promise / future* puede no funcionar para algún escenario en particular, aunque tiene una estructura muy similar al soporte de E/S asíncrono de muchos sistemas operativos.
+
+## Guardar una excepción para el futuro
+
+Hasta ahora, todo el código ha ignorado a las excepciones. Sería bonito imaginar un mundo donde todo sale bien siempre, pero no es el caso. A veces los discos se llenan, a veces lo que se busca no está ahí, a veces las redes fallan, y a veces las bases de datos se caen. Si se está trabajando en el hilo que necesita el resultado, el código podría mostrar el error con una excepción, por lo que sería innecesariamente restrictivo exigir que todo salga bien solo porque se quiere usar `std::packaged_task` o `std::promise`. La librería standard de C++ provee una forma limpia de manejar las excepciones en estos escenarios y permite que se guarden como parte del resultado asociado.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+double square_root(double x) {
+    if(x<0) {
+        throw std::out_of_range("x<0");
+    }
+    return sqrt(x);
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [sqrt]: Función para calcular la raíz cuadrada de un número]
+
+Si en una función como Listing [sqrt] si se le pasa un `-1` a `square_root`, levanta una excepción y eso lo ve quién llamó a la función. Pero ahora, en lugar de invocar a esta función desde el hilo actual `double y = square_root(-1)`, se hace esta llamada de manera asíncrona.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::future<double> f = std::async(square_root,-1);
+double y = f.get();
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [sqrt_async]: Llamar a la raíz cuadrada desde un `std::async`]
+
+Sería ideal que el comportamiento fuera exactamente el mismo, cuando `y` obtiene el resultado de la llamada a la función en cualquier caso, estaría bien si el hilo que llamó a `f.get()` pudiera ver también la excepción, como pasaría en el código mono hilado.
+
+Pues eso es lo que sucede, si la llamada a la función que se invoca como parte de `std::async` levanta una excepción, esta es almacenada en el *future* en lugar del valor almacenado, el *future* pasa a estar `ready`, y una llamada a `get()` vuelve a levantar la excepción almacenada (el standard no especifica si es el objeto de la excepción original que se vuelve a lanzar, o es una copia, diferentes compiladores y librerías hacen cosas distintas). Lo mismo sucede si se encapsula la función en un `std::packaged_task`, cuando la tarea se invoque, si la función encapsulada levanta una excepción, ésta se almacena en el *future* en lugar del resultado, y se vuelve a levantar cuando se llama a `get()`.
+
+Y como era de esperar, `std::promise` se comporta de igual manera, con una llamada a la función explícita. Si se quiere almacenar la excepción en lugar del valor, se llama a la función miembro `set_exception()` en lugar de `set_value()`. Esto podría ser usado en un bloque `try/catch` para una excepción lanzada como parte del algoritmo, para completar la *promise* con esa excepción.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+extern std::promise<double> some_promise;
+
+try {
+    some_promise.set_value(calculate_value());
+}
+catch(...) {
+    some_promise.set_exception(std::current_exception());
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [promise_exception]: Almacenar una excepción en `std::promise`]
+
+Esto usa `std::current_exception()` para obtener la excepción lanzada, la alternativa sería usar `std::make_exception_ptr()` para almacenar una excepción nueva directamente sin lanzarla.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+some_promise.set_exception(std::make_exception_ptr(std::logic_error("foo")));
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [promise_exception2]: Almacenar una excepción en `std::promise` sin lanzarla]
+
+Esta opción es mucho más limpia que usar un bloque *try/catch* si el tipo de la excepción se conoce, y debería usarse siempre que sea posible, no solo simplifica el código, si no que le da al compilador margen para optimizar el código.
+
+Otra manera de almacenar una excepción en un *future* es destruir el `std::promise` o `std::packaged_task` asociados con el *future* sin llamar a la función para almacenar un valor en la *promise* o invocar a la tarea empaquetada. En cualquier caso, el destructor de `std::promise` o `std::packaged_task` almacenará una excepción `std::future_error` con un código de error `std::future_errc::broken_promise` en el estado asociado del *future* si este no está `ready`. Al crear un *future* se hace la *promise* de proveer un valor o excepción, y al destruir el origen de ese valor o excepción sin ofrecerlo se rompe esa *promise*. Si el compilador no almacenara nada en el *future* en este caso, un hilo que estuviera esperando podría hacerlo para siempre.
+
+## Esperando desde múltiples hilos
+
+`std::future` tiene sus limitaciones, entre ellas, que solo un hilo puede esperar al resultado. Si hay que esperar al mismo evento desde más de un hilo, hay que usar `std::shared_future` en su lugar.
+
+A pesar de que `std::future` maneja toda la sincronización necesaria para transferir datos de un hilo a otro, las llamadas a las funciones miembro de una instancia concreta de `std::future` no están sincronizadas entre sí. Si se accede a un objeto único `std::future` desde varios hilos sin sincronización adicional, se tiene una condición de carrera y *undefined behavior*. Esto es por diseño, `std::future` modela la propiedad única de un resultado asíncrono, y la naturaleza de un solo uso de `get()` hace a ese acceso concurrente inútil. Solo un hilo puede recoger el valor, puesto que tras la primera llamada a `get()` no queda ningún valor que recoger.
+
+Si el diseño del código de la aplicación necesita que varios hilos tengan que esperar al mismo evento, se puede usar `std::shared_future`. Mientras que `std::future` solo se puede mover (para que la propiedad pueda ser transferida entre instancias, pero solo una instancia se relaciona con un resultado asíncrono a la vez), las instancias `std::shared_future` se pueden copiar (para poder tener varios objetos relacionados con el mismo estado asociado).
+
+Ahora, con `std::shared_future`, las funciones miembro en un objeto individual siguen estando sin sincronizar, así que para evitar condiciones de carrera al acceder a un solo objeto desde varios hilos, hay que proteger los accesos con un bloqueo. La mejor manera para usarlo sería pasar una copia de un objeto `std::shared_future` a cada hilo, así cada hilo puede acceder a su propio objeto local `shared_future` de manera segura, puesto que los componentes internos están sincronizados correctamente por la librería. Acceder al estado asíncrono compartido desde varios hilos es seguro si cada hilo accede a ese estado a través de su propio objeto `std::shared_future`.
+
+Un posible uso de `std::shared_future` puede ser implementar la ejecución paralela de algo similar a una hoja de cálculo compleja, cada celda tiene un único valor final, que puede ser usada por algunas fórmulas en muchas otras celdas. Las fórmulas para calcular los resultados de las celdas dependientes podrían usar un `std::shared_future` para referenciar a la primera celda. Si todas las fórmulas de las celdas individuales se ejecutan en paralelo, las tareas que puedan completarse lo harán, mientras que las que dependen de otras se bloquearán hasta que sus dependencias estén listas. Esto permite al sistema hacer un uso máximo de la concurrencia por hadrware disponible.
+
+Las instancias de `std::shared_future` que referencian algún estado asíncrono se construyen a partir de instancias de `std::future` que referencian dicho estado. Puesto que los objetos `std::future` no comparten la propiedad del estado asíncrono con ningún otro objeto, la propiedad se debe transferir dentro del `std::shared_future` usando `std::move`, dejando al `std::future` vacío, sin estado, como tras un constructor por defecto.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::promise<int> p;
+std::future<int> f(p.get_future());
+
+assert(f.valid());
+
+std::shared_future<int> sf(std::move(f));
+
+assert(!f.valid());
+assert(sf.valid());
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [shared_const]: Construcción de un `std::shared_future` a partir de un `std::future`]
+
+El *future* `f` es inicialmente válido, puesto que se refiere al estado asíncrono de la promesa `p`, pero tras transferir su estado a `sf`, `f` ya no es válido, mientras que `sf` sí lo es.
+
+Tal como pasa con otros objetos que se pueden mover, la transferencia de la propiedad es implícita para *rvalues*, por tanto, se puede construir un `std::shared_future` directamente desde el valor de retorno de la función miembro `get_future()` de un objeto `std::promise`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::promise<std::string> p;
+std::shared_future<std::string> sf(p.get_future());
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [shared_const2]: Construcción de un `std::shared_future` directamente a partir de `get_future()`]
+
+Aquí la transferencia de propiedad es implícita, `std::shared_future` se construye desde un *rvalue* del tipo `std::future<std::string>`.
+
+`std::future` tiene una característica adicional para facilitar el uso de `std::shared_future` a través de la deducción automática del tipo de una variable desde su inicializador. `std::future` tiene una función miembro `share()` que crea un `std::share_future` y le transfiere la propiedad directamente. Con esto se escribe un poco menos de código y lo hace más simple.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::promise< std::map< SomeIndexType, SomeDataType, SomeComparator, SomeAllocator>::iterator > p;  //complex map object
+auto sf = p.get_future().share();
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [shared_const3]: Construcción de un `std::shared_future` directamente a partir de `share()`]
+
+En este caso, el tipo de `sf` es deducido como un `std::shared_future< std::map< SomeIndexType, SomeDataType, SomeComparator, SomeAllocator>::iterator >`, que es bastante largo. Si el comparador o el allocator se cambian, solo hay que cambiar el tipo en la promesa, el tipo del *future* se actualiza automáticamente.
+
+
+# Esperando con límite de tiempo
+
+A veces se quiere limitar la cantidad de tiempo que se está esperando a un evento en particular, porque se tiene un límite de tiempo muy marcado sobre cuanto tiempo debe tardar una sección de código, o bien porque hay otra tarea que puede estar realizando el hilo si el evento no va a suceder pronto. Para manejar estos escenarios, muchas de las funciones de espera tienen variantes que permiten especificar un tiempo de espera.
+
+Todas las llamadas bloqueantes hasta ahora se bloquean por un periodo de tiempo indefinido, suspendiendo al hilo hasta que el evento por el que se está esperando ocurre. En muchos casos esto puede funcionar bien, pero en otros se puede necesitar limitar el tiempo a esperar. Por ejemplo, para poder mandar un mensaje de "estoy vivo" a un usuario interactivo, u otro proceso, o incluso para poder abortar una espera si el usuario se ha cansado y ha pulsado el botón de *Cancelar*.
+
+Hay dos tipos de tiempos de espera que se pueden especificar: uno basado en una duración, donde se espera una cantidad específica de tiempo (por ejemplo, 30 msecs); o un tiempo espera absoluto, donde se espera hasta un punto del tiempo futuro (por ejemplo, hasta las 13:50:20 del 22/11/2025). La mayoría de las funciones de espera tienen variantes que manejan las dos formas de tiempo de espera. Las variantes que permiten los tiempos de espera basados en duraciones, tienen un sufijo `_for`, y las que manejan los absolutos `_until`.
+
+Por ejemplo, `std::condition_variable` tiene dos implementaciones sobrecargadas de la función miembro `wait_for()` y otras dos de `wait_until()` que corresponden a las de `wait()`, una que espera hasta que se llama a `notify_xx` o caduca el tiempo de espera, o se produce un despertar falso, y la otra que verifica el predicado que se pasa cuando se despierta y volverá solo cuando el predicado sea cierto (y la variable de condición se haya notificado) o el tiempo de espera haya caducado.
+
+## Relojes
+
+Tal como lo ve la librería standard de C++, un reloj es una fuente de información acerca del tiempo. Es una clase que tiene 4 partes:
+- La hora actual, `now`
+- El tipo del valor usado para representar el tiempo obtenido de un reloj
+- El periodo de tictac del reloj
+- Si el reloj funciona a un ritmo uniforme y se considera por tanto un reloj estable
+
+La hora actual de un reloj se puede obtener llamando a la función miembro estática `now()` para la clase `clock`, por ejemplo, `std::chrono::system_clock::now()` devolverá la hora actual del reloj del sistema. El tipo de los puntos de tiempo de un reloj particular se especifica por el `typedf` del miembro `time_point`, así que el tipo de retorno de `some_clock::now()` es `some_clock::time_point`.
+
+El periodo de tictac del reloj se especifica como un número fraccional de segundos, que es el `typedef` del miembro `period` del reloj, un reloj que hace tictac 25 veces por segundo tiene un `period` de `std::ratio<1,25>`, mientras que un reloj que hace tictac cada 2.5 segundos tiene un `period` de `std::ratio<5,2>`. Si el periodo de un reloj no se puede conocer hasta estar en tiempo de ejecución, o puede variar durante la ejecución de la aplicación, el `period` se puede especificar como la media de ese periodo, el periodo más pequeño posible o cualquier otro valor que el escritor de la librería considere apropiado. No hay ninguna garantía que el periodo de tictac observado en la ejecución del programa encaje con el `period` especificado para ese reloj.
+
+Si un reloj funciona a un ritmo uniforme (cumpla o no con el `period`) y no se pueda ajustar, el reloj se dice que es un reloj estable *steady*. El miembro estático `is_steady` de la clase `clock` es `true` en ese caso, y si no, es `false`. Normalmente, un `std::chrono::system_clock` no  será *steady*, puesto que el reloj no puede ajustarse, incluso aunque dicho ajuste se haga automáticamente para tener en cuenta la deriva del reloj local. Ese ajuste podría hacer que una llamada a `now()` devolviera un valor anterior que el devuelto por una llamada anterior a `clock()`, lo cual es una violación de los requisitos para una tasa de tics uniforme. Los relojes estables son importantes para los cálculos de tiempos de espera, así que la librería standard de C++ tiene uno, `std::chrono::steady_clock`. Los otros relojes que aparecen en esta librería son `std::chrono::system_clock` que representa el reloj de tiempo real del sistema y tiene funciones para convertir sus puntos de tiempo a y desde valores `time_t`, y el `std::chrono::high_resolution_clock`, que ofrece el periodo más pequeño posible entre tictacs (y por tanto la mayor resolución posible) de todos, puede ser un `typedef` a alguno de los otros. Estos relojes se definen en la cabecera `<chrono>`, junto con muchas funciones para manejar tiempos.
+
+## Duraciones de tiempo
+
+Las duraciones de tiempo son la parte más simple, se manejan con la clase templatizada `std::chrono::duration<>`, todas las funciones relacionadas con el tiempo por la librería de hilos están en el *namespace* `std::chrono`. El primer parámetro del template es el tipo de la representación (como `int`, `long` o `double`), y el segundo es la fracción especificando cuantos segundos representan cada unidad de tiempo. Por ejemplo, un número de minutos almacenado en un tipo `short` es `std::chrono::duration<short, std::ratio<60,1>>`, puesto que hay 60 segundos en un minuto. Por otro lado, un número de milisegundos almacenado en un tipo `double` será `std::chrono::duration<double, std::ration<1,1000>>` puesto que cada milisegundo es 1/1000 segundos.
+
+Hay varios `typedefs` predefinidos en el *namespace* `std::chrono` para varias duraciones, `nanoseconds`, `microseconds`, `milliseconds`, `seconds`, `minutes` y `hours`. Todos ellos usan tipos integrales lo suficientemente grandes para la representación elegida tal que se pueda representar una duración de unos 500 años en las unidades apropiadas. Hay también `typdefs` para todas las relaciones habituales, desde `std::atto` (10-18) a `std::exa` (1018) para usar cuando se especifican duraciones como `std::duration<double, std::centi>` para usar como la centésima de un segundo representada en un `double`.
+
+En C++14 se introdujeron una serie de operadores de sufijo literal predefinidos para las duraciones en el *namespace* `std::chrono_literals`, que pueden simplificar mucho el código que usa valores hard codeados.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+using namespace std::chrono_literals;
+auto one_day=24h;
+auto half_an_hour=30min;
+auto max_time_between_messages=30ms;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [literal_suffix]: Operadores de sufijo literal predefinidos para las duraciones]
+
+Cuando se usan con literales enteros, estos sufijos son equivalentes a usar los `typedefs` para duraciones predefinidos, `15ns` es lo mismo que `std::chrono::nanoseconds(15)`. Sin embargo, cuando se usan on literales de coma flotante, estos sufijos crean duraciones de tiempo de coma flotante escalados correctamente sin un tipo de representación especifico, `2.5min` es igual a `std::chrono::duration<some-floating-type, std::ratio<60,1>>`. Si es importante el rango de precisión respecto del tipo de coma flotante elegido, hay que construir el objeto con una representación adecuada a mano, en lugar de usar estos sufijos.
+
+La conversión entre duraciones es implícita donde no haya que truncar el valor (convertir horas a segundos está bien, pero convertir segundos a horas no). Las conversiones explícitas se pueden realizar con `std::chrono::duration_cast<>`. El resultado se trunca en lugar de ser redondeado.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::chrono::milliseconds ms(54802);
+std::chrono::seconds s = std::chrono::duration_cast<std::chrono::seconds>(ms);   // the result will be 54
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [duration_cast]: Conversión explícita entre duraciones]
+
+Las duraciones soportan operaciones aritméticas, se pueden sumar y restar, multiplicar o dividir por una constante del tipo de representación oportuno (el primer parámetro del template). `5 * seconds(1)` es igual a `seconds(5)` o `minutes(1) - seconds(55)`. El número de unidades en una duración se puede obtener con la función miembro `count()`. `std::chrono::milliseconds(1234).count()` devuelve `1234`.
+
+Las esperas basadas en duración se hacen con instancias de `std::chrono::duration<>`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+std::future<int> f = std::async(some_task);
+if(f.wait_for(std::chrono::milliseconds(35)) == std::future_status::ready)
+    do_something_with(f.get());
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [wait_time]: Esperar 35 milisegundos como máximo a un *future*]
+
+Todas las funciones `wait` devuelven un estado para indicar si el tiempo ha expirado o ha ocurrido el evento. En Listing [wait_time] se espera a un *future*, así que la función devuelve `std::future_status::timeout` si el tiempo ha expirado, `std::future_status::ready` si el *future* está listo o `std::future_status::deferred` si la tarea del *future* se ha pospuesto. El tiempo de una espera basada en duración se mide usando el reloj estable interno de la librería, así que, 35 milisegundos significan 35 milisegundos de tiempo que ha pasado, aunque el reloj del sistema se haya ajustado (hacia delante o hacia detrás) mientras se esperaba. Por supuesto, los caprichos del *scheduler* del sistema y las precisiones variables de los relojes del sistema operativo implican que el tiempo desde que el hilo lanza la llamada hasta que vuelve de ella puede ser mucho más largo que 35 milisegundos.
+
+## Puntos temporales
+
+Un punto temporal en un reloj se representa por una instancia de la clase templatizada `std::chrono::time_point<>`, que especifica a que reloj se refiere con el primer parámetro del template y las unidades de medida (una especialización de `std::chrono::duration<>`) como segundo parámetro. El valor de un punto temporal es la longitud del tiempo (en múltiplos de la duración especificada) desde otro punto de tiempo llamado *epoch* del reloj. El *epoch* del reloj es una propiedad básica del mismo, pero no es algo que venga dirigido por la librería standard de C++. Los *epochs* más típicos son el `1 de Enero de 1970 a las 00.00.00`, o el momento en el que el ordenador que está ejecutando la aplicación se arrancó. Los relojes pueden compartir un *epoch* o tenerlos independientes. Si dos relojes comparten un *epoch*, la definición de tipo de `time_point` en una clase puede especificar la otra como el tipo de reloj asociado con el `time_point`. A pesar de no poder averiguar cuando es ese *epoch*, se puede obtener cuanto tiempo ha pasado desde entonces con `time_since_epoch()` para un `time_point` en particular. Esta función miembro devuelve un valor de duración que muestra cuanto tiempo ha pasado desde el *epoch* de ese reloj hasta ese `time_point`.
+
+Por ejemplo, se puede especificar un punto temporal como `std::chrono::time_point<std::chrono::system_clock, std::chrono::minutes>`. Este podría contener el tiempo relativo al reloj del sistema pero medido en minutos en lugar de la precisión nativa del reloj del sistema, que suele ser en segundos o menos.
+
+Se pueden sumar o restar duraciones a instancias de `std::chrono::time_point<>` para producir nuevos puntos temporales, por lo que `std::chrono::high_resolution_clock::now() + std::chrono::nanoseconds(500)` devolverá un punto en el tiempo 500 nanosegundos en el futuro. Esto se puede usar para calcular un tiempo de espera absoluto cuando se sabe la duración máxima de un bloque de código, pero hay muchas llamadas a funciones de espera dentro o funciones que no esperan que preceden a alguna función que tiene que esperar pero se lleva gran parte del tiempo asignado.
+
+También se puede restar un punto temporal de otro si comparten en el mismo reloj. El resultado es una duración que muestra cuanto tiempo hay entre los dos puntos temporales. Pudiéndose usar para medir el tiempo que cuesta ejecutar algún bloque de código.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+auto start=std::chrono::high_resolution_clock::now();
+do_something();
+auto stop=std::chrono::high_resolution_clock::now();
+
+std::cout << ”do_something() took “ << std::chrono::duration<double,std::chrono::seconds>(stop-start).count() << ” seconds” << std::endl;
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [measuring]: Midiendo el tiempo de un bloque de código]
+
+El parámetro del reloj de una instancia de `std::chrono::time_point<>` hace más que simplemente definir el *epoch*. Cuando se pasa el punto temporal a una función `wait` que recibe un tiempo de espera absoluto, el parámetro del reloj del punto temporal se usa para medir el tiempo que transcurre. Esto tiene consecuencias importantes cuando se cambia el reloj, puesto que `wait` registra ese cambio del reloj y no volverá hasta que la función `now()` devuelva un valor posterior que el tiempo de espera especificado. Si el reloj se ajusta hacia adelante, esto puede reducir la longitud total de la espera (como si hubiera sido medida con un reloj estable), y se ajusta hacia atrás, puede incrementar el tiempo de espera.
+
+Estos puntos temporales se usan con las variantes `_until` de las funciones `wait`. El caso de uso típico es como un desplazamiento `offset` desde `some_clock::now()` en un punto fijo en el programa, aunque los puntos temporales asociados con el reloj del sistema se pueden obtener convirtiendo a partir de `time_t` usando la función estática `std::chrono::system_clock::to_time_point()` para programar operaciones en tiempo visible por el usuario.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#include <condition_variable>
+#include <mutex>
+#include <chrono>
+
+std::condition_variable cv;
+bool done;
+std::mutex m;
+
+bool wait_loop() {
+    auto const timeout= std::chrono::steady_clock::now()+ std::chrono::milliseconds(500);
+    std::unique_lock<std::mutex> lk(m);
+    while (!done) {
+        if (cv.wait_until(lk,timeout) == std::cv_status::timeout)
+            break;
+    }
+    return done;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [waiting_timeout]: Esperando a una variable de condición 500 milisegundos]
+
+Esta es la forma recomendada de esperar a variables de condición con un límite de tiempo si no se le pasa un predicado a `wait`. De esta manera, la longitud total del bucle queda limitada. Como se vió anteriormente, se necesita estar en un bucle al usar una variable de condición si no se le pasa un predicado, para evitar falsos despertares. Si se usa `wait_for()` en un bucle, se podría acabar esperando casi la totalidad del tiempo antes de un falso despertar, y la próxima vez el tiempo de espera empieza de nuevo. Esto se puede repetir cualquier número de veces, haciendo que el tiempo total de espera sea ilimitado.
+
+## Funciones que aceptan tiempos de espera
+
+El uso más simple de un tiempo de espera *timeout* es añadir un retraso al procesamiento de un hilo en particular de manera que no robe tiempo de procesamiento de otros hilos cuando no tiene nada que hacer. Parecido a como se ve en Listing [sleep], donde se verifica el estado de un `flag` dentro de un bucle. Las dos funciones que manejan esto son `std::this_thread::sleep_for()` y `std::this_thread::sleep_until()`. Funcionan como una alarma, el hilo se va a dormir o bien por un tiempo determinado (con `sleep_for()`) o hasta un punto temporal (con `sleep_until()`). La función `sleep_for()` tiene sentido en ejemplos como los de Section [Esperando a un evento u otra condición], donde hay que hacer algo periódicamente, y el tiempo transcurrido es lo que realmente importa. Por otro lado, `sleep_until()` permite programar que el hilo se despierte en un punto temporal particular. Esto se puede usar para disparar copias de seguridad a media noche, o que se imprima algún informe a las 6.00 A, o suspender al hilo hasta el refresco del siguiente fotograma en un videojuego.
+
+Estas funciones para dormir un hilo no son las únicas que reciben un tiempo de espera, ya se ha visto como usarlos con variables de condición y *futures*. Incluso se pueden usar tiempos de espera al intentar adquirir un bloqueo en un mutex, si el mutex soporta esta operación. Los `std::mutex` y `std::recursive_mutex` no soportan tiempos de espera al bloquearlos, pero `std::timed_mutex` y `std::recursive_timed_mutex` sí lo hacen. Ambos tipos tienen funciones miembro `try_lock_for()` y `try_lock_until()` que intentan bloquear en un tiempo específico o antes de un punto temporal.
+
+# Usando la sincronización de operaciones para simplificar el código
+
+El uso de las funciones de sincronización descritas hasta ahora en como bloques de construcción permite centrarse en las operaciones que necesitan sincronización en lugar de en la mecánica. Una forma en la que esto puede ayudar a simplificar el código es que se adopta un enfoque mucho más funcional (en el sentido de programación funcional) sobre la programación concurrente. En lugar de compartir datos directamente entre hilos, cada tarea puede llevarse los datos que necesita, y el resultado puede difundirse a otros hilos que puedan necesitarlo a través del uso de *futures*.
+
+## Programación funcional con *futures*
+
+El termino programación funcional se refiere a un estilo de programación donde el resultado de la llamada a una función depende exclusivamente de los parámetros que recibe esa función y no de cualquier estado externo a la misma. Esto tiene relación con el concepto matemático de función, y significa que si se invoca una función dos veces con los mismos parámetros, el resultado será exactamente el mismo. Esta es una propiedad de muchas funciones matemáticas en la librería standard de C++, como `sin`, `cos` o `sqrt`, y operaciones simples en tipos básicos, `3+3` o `1.3/4.7`. Una función *pura* no modifica tampoco ningún estado externo, los efectos de una función así están limitados a su valor de retorno.
+
+Esto hace que sea fácil pensar en las cosas, especialmente cuando la concurrencia está por medio, puesto que la mayoría de los problemas asociados con la memoria compartida desaparecen. Si no hay modificaciones a los datos compartidos, no pueden haber condiciones de carrera y por tanto, no es necesario proteger esos datos compartidos con mutexes. Esta simplificación es tan potente, que lenguajes como *Haskell*, donde todas las funciones son puras por defecto, son cada vez más populares para programar sistemas concurrentes. Puesto que la mayor parte de las funciones son puras, aquellas impuras que realmente modifican el estado compartido destacan aún más, y por tanto es mucho más sencillo encajarlas en la estructura global de la aplicación.
+
+Los beneficios de la programación funcional no están limitados a estos lenguajes donde es el paradigma por defecto. C++ es un lenguaje multi paradigma, y es perfectamente posible escribir programas con este estilo. Esto es aún más sencillo ahora con las funciones anónimas *lambda*, la incorporación de `std::bind` y la introducción de la deducción automática del tipo de las variables. Los *future* son la pieza final del puzzle que hace a la concurrencia al estilo de la programación funcional viable en C++, se puede pasar un *future* entre los hilos para permitir que el resultado de una operación dependa del resultado de otra, si ningún acceso explicito a los datos compartidos.
+
+### Quicksort estilo funcional
+
+Para ilustrar el uso de *futures* en un estilo funcional de concurrencia, se puede implementar el algoritmo de ordenación *QuickSort*. La idea del algoritmo es simple, dada una lista de valores, coger un elemento que sea el elemento pivote, y entonces partir la lista en dos conjuntos, los que están por debajo del pivote y los que están por encima o igual. Se obtiene una copia ordenada de la lista ordenando ambos conjuntos y devolviendo la lista ordenada de valores menores que el pivote, seguida por el pivote y luego la lista ordenada de valores mayores o igual que el pivote.
+
+![Figure [res/005_001]: Algoritmo de Quicksort](res/005_001.png)
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+template<typename T>
+std::list<T> sequential_quick_sort(std::list<T> input) {
+    if(input.empty()) {
+        return input;
+    }
+
+    std::list<T> result;
+    result.splice(result.begin(), input, input.begin());
+
+    T const& pivot = *result.begin();
+    auto divide_point = std::partition(input.begin(), input.end(), [&](T const& t) {return t < pivot;});
+
+    std::list<T> lower_part;
+    lower_part.splice(lower_part.end(), input, input.begin(), divide_point);
+
+    auto new_lower(sequential_quick_sort(std::move(lower_part)));
+    auto new_higher(sequential_quick_sort(std::move(input)));
+
+    result.splice(result.end(), new_higher);
+    result.splice(result.begin(), new_lower);
+
+    return result;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [seq_quicksort]: Implementación secuencial recursiva de QuickSort]
+
+Esta es una posible implementación, que recibe y devuelve una lista por valor, en lugar de ordenarla en el sitio como hace `std::sort()`, pero de manera secuencial y recursiva. Aunque el estilo sea de programación funcional, si se usara en todo momento, habría que hacer muchas copias, así que se usa el modo normal imperativo para la parte interna. Se coge el primer elemento como pivote separándolo de la lista mediante `splice()`. A pesar de que esto pueda acabar en una ordenación sub óptima (hablando de número de comparaciones e intercambios), hacer cualquier otra cosa con una `std::list` puede ser bastante lento debido al tiempo usado en recorrer la lista. Se sabe que se quiere en el resultado final, así que se incorpora directamente a la lista que se va a usar como resultado. Pero se quiere también usar para las comparaciones, así que se coge una referencia a ese elemento pivote para evitar la copia. Entonces se usa `std::partition` para dividir la secuencia entre aquellos valores menores que el pivote, y aquellos no menores al pivote. La manera más sencilla de especificar el criterio de partición es usar una función *lambda*, se usa una captura de referencias para evitar copiar el valor de pivote.
+
+`std::partition` reorganiza la lista en el sitio y devuelve un iterador marcando el primer elemento que no es menor que el valor pivote. El tipo completo de un iterador puede ser muy largo y complicado, así que se usa el especificador de tipo `auto` para forzar al compilador a averiguarlo por sí mismo.
+
+Ahora, al optar por un interface de estilo funcional e intentar usar recursividad para ordenar las dos mitades, hay que crear dos listas. Se hace usando `splice()` otra vez para mover los valores desde `input` hasta el punto de división en una nueva lista `lower_part`. Esto deja al resto de valores en `input`. Entonces se pueden ordenar las dos listas con llamadas recursivas. Usando `std::move()` para pasar las listas se evita una copia, y el resultado de todas maneras se mueve en el retorno de manera implicita. Finalmente, se usa `splice()` otra vez para juntar los dos resultados en el orden correcto. Los valores de `new_higher` van al final, tras el pivote, y los de `new_lower` van al principio, antes del pivote.
+
+### Quicksort paralelo usando *futures*
+
+Al usar un estilo funcional es facil convertirlo a una versión paralela usando *futures*.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+template<typename T>
+std::list<T> parallel_quick_sort(std::list<T> input) {
+    if(input.empty()) {
+        return input;
+    }
+
+    std::list<T> result;
+    result.splice(result.begin(),input,input.begin());
+
+    T const& pivot = *result.begin();
+    auto divide_point = std::partition(input.begin(), input.end(), [&](T const& t){return t < pivot;});
+
+    std::list<T> lower_part;
+    lower_part.splice(lower_part.end(), input, input.begin(), divide_point);
+
+    std::future<std::list<T> > new_lower(
+        std::async(& parallel_quick_sort<T>, std::move(lower_part)));
+    auto new_higher(
+        parallel_quick_sort(std::move(input)));
+
+    result.splice(result.end(), new_higher);
+    result.splice(result.begin(), new_lower.get());
+
+    return result;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [parallel_quicksort]: Implementación paralela de QuickSort]
+
+El gran cambio en esta implementación es que en lugar de ordenar la porción inferior en el hilo de ejecución, se ordena en otro hilo usando `std::async`. La parte superior de la lista se ordena con recursividad directa como antes. Llamando recursivamente a `parallel_quick_sort()` se puede aprovechar la concurrencia por hardware disponible. `std::async` lanza un nuevo hilo cada vez, así que si se llama 3 veces a la función recursiva se tienen 8 hilos ($2^3$), si se llama 10 veces (para 1000 elementos aprox) se tienen 1024 hilos en ejecución ($2^{10}$) si el hardware puede soportarlo. Si la librería decide que hay demasiadas tareas lanzadas (quizás porque el número de tareas excede la concurrencia por hardware disponible), puede cambiar a lanzar las nuevas tareas de manera síncrona. Se ejecutarán en el hilo que llama a `get()` en lugar de uno nuevo, evitando así el sobrecoste de pasar la tarea a otro hilo cuando esto no beneficie al rendimiento. Cabe destacar que es perfectamente válido que `std::async` inicie un nuevo hilo para cada tarea (incluso ante un crecimiento masivo de hilos), a menos que se especifique explícitamente `std::launch::deferred`, o ejecutar todas las tareas de manera síncrona a menos que se especifique `std::launch::async`. Si se confia en la librería para el escalado automático, es interesante revisar la documentación de la implementación específica con la que es está trabajando para ver que comportamiento cumple.
+
+En lugar de usar `std::async()` se podría escribir una función propia `spawn_task()` como una encapsulación de un `std::packaged_task` para el resultado de la llamada a la función, coger su *future*, lanzarla en un hilo y devolver el *future*. Esto no daría muchas ventajas (se podría producir el mismo fenómeno de lanzamiento masivo de hilos), pero podría ser un inicio para migrar a una implementación más sofisticada que añadiera la tarea a una cola para ser ejecutada por un *pool* de hilos. Se puede usar una aproximación como esta solo si se sabe lo que se está haciendo y se necesita control absoluto sobre la forma en la que está construido el *pool* de hilos y como ejecuta las tareas.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+template<typename F,typename A>
+std::future<std::result_of<F(A&&)>::type> spawn_task(F&& f,A&& a) {
+    typedef std::result_of<F(A&&)>::type result_type;
+    std::packaged_task<result_type(A&&)> task(std::move(f)));
+    std::future<result_type> res(task.get_future());
+    std::thread t(std::move(task), std::move(a));
+    t.detach();
+    return res;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [spawn_task]: Implementación de `spawn_task()`]
+
+Al usar recursividad directa para conseguir `new_higher` se transfiere en el sitio como en el algoritmo anterior. Pero `new_lower` es ahora `std::future<std::list<T>>` en lugar de una lista, así que hay que llamar a `get()` para obtener el valor antes de llamar a `splice()`. Entonces es cuando se espera a la tarea en background se complete y mueve el resultado dentro de la llamada a `splice()`. `get()` devuelve una referencia *rvalue* al resultado que contiene, con lo cual, se puede mover.
+
+Aún asumiendo que `std::async()` hace un uso óptimo de la concurrencia de hardware disponible, sigue sin ser una implementación ideal de QuickSort. Por una parte, `std::partition` hace demasiado trabajo, y aún hay una llamada secuencial.
+
+## Sincronizar operaciones pasando mensajes
+
+La programación funcional no es el único paradigma de programación que evita compartir datos mutables, otro paradigma es *CSP* (Communicating Sequential Processes), donde los hilos conceptualmente están completamente separados, sin datos compartidos pero con canales de comunicación que permite que se pasen mensajes entre ellos. Este es el paradigma adoptado por el lenguaje *Erlang* y por el entorno *MPI* (Message Passing Interface), usado a menudo para computación de alto rendimiento en C y C++.
+
+La idea de *CPS* es simple, si no hay datos compartidos se puede pensar en cada hilo de manera completamente independiente, basándose solo en como se comporta en respuesta a los mensajes que recibe. Por tanto, cada hilo es efectivamente una máquina de estados, cuando recibe un mensaje, actualiza su estado de alguna manera y quizás manda uno o más mensajes a otros hilos, y el procesamiento se realiza en función del estado inicial. Una forma de escribir estos hilos sería formalizar esto e implementar una máquina de estados finita *FSM* (Finite State Machine), pero no es la única manera, esta máquina de estados puede estar implícita en la estructura de la aplicación. El método que mejor se adapte en un escenario en concreto dependerá de los requisitos exactos de comportamiento de la situación y de la experiencia de los programadores. Independientemente de cómo se implemente cada hilo, la separación en procesos independientes tiene el potencial de eliminar gran parte de las complicaciones de la concurrencia de datos compartidos y, por lo tanto, simplificar la programación, reduciendo la tasa de errores.
+
+Los verdaderos procesos secuenciales de comunicación no tienen datos compartidos, y toda la comunicación pasa a través de colas de mensajes, pero puesto que los hilos en C++ comparten un espacio de direcciones, no es posible forzar este requisito. Aquí es donde aplica la disciplina del programador, es su responsabilidad asegurar que no se comparten datos entre los hilos. Por supuesto, las colas de mensajes tienen que estar compartidas para que los hilos se puedan comunicar, pero los detalles se pueden encapsular en la librería.
+
+Por ejemplo, se está implementando el código para la gestión de un cajero automático, este código necesita manejar la interacción con la persona intentando retirar dinero en efectivo y la interacción con el banco correspondiente, además de controlar la maquinaria física para aceptar la tarjeta del usuario, mostrar los mensajes oportunos, manejar las pulsaciones del teclado, emitir el dinero y devolver la tarjeta.
+
+Una forma de gestionar todo esto sería dividir el código en tres hilos independientes, uno para manejar la maquinaria física, otro para manejar la lógica del cajero y otro para comunicarse con el banco. Estos hilos se podrían comunicar puramente pasándose mensajes en lugar de compartir ningún dato. Por ejemplo, el hilo que gestiona la parte física enviaría un mensaje al hilo de lógica cuando la persona introduce su tarjeta o pulsa un botón, y el hilo de lógica enviaría un mensaje al hilo físico indicando cuanto dinero dispensar, y así en consecuencia.
+
+Una manera de modelar la lógica del cajero sería como una maquina de estados. En cada estado, el hilo espera a un mensaje aceptable, que entonces procesa. Esto puede resultar en hacer la transición a otro estado, y el ciclo continua.
+
+![Figure [res/005_002]: Máquina de estados para el cajero automático](res/005_002.png)
+
+En esta implementación simplificada, el sistema espera a que se inserte una tarjeta. Una vez se ha insertado, espera a que el usuario introduzca su número PIN, un dígito cada vez, se puede borrar el último dígito introducido. Una vez se tienen los suficientes dígitos, se verifica el PIN. Si el PIN no es correcto, se acaba, se devuelve la tarjeta al usuario y se vuelve a esperar a que alguien introduzca su tarjeta. Si el PIN es correcto, se espera a que cancelen la transacción o introduzcan la cantidad a retirar. Si cancelan, se acaba y se devuelve la tarjeta. Si seleccionan una cantidad, se espera a la confirmación del banco antes de dispensar el dinero y devolver la tarjeta, o bien, se muestra el mensaje de "fondos insuficientes" y se devuelve la tarjeta. Obviamente, un cajero real tendría una lógica mucho más compleja, pero es suficiente para ilustrar la idea.
+
+Una vez diseñada la máquina de estados para la lógica del cajero, se puede implementar con una clase que tenga una función miembro que represente cada estado. Cada una de esas funciones puede esperar un conjunto específico de mensajes de entrada y manejarlos cuando lleguen, posiblemente disparando el cambio a otro estado. Cada mensaje distinto se representa con un `struct` distinto.
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+struct card_inserted {
+    std::string account;
+};
+
+class atm {
+        messaging::receiver incoming;
+        messaging::sender bank;
+        messaging::sender interface_hardware;
+
+        void (atm::*state)();
+        std::string account;
+        std::string pin;
+
+        void waiting_for_card() {
+            interface_hardware.send(display_enter_card());
+            incoming.wait().handle<card_inserted>(
+                [&](card_inserted const& msg) {
+                    account = msg.account;
+                    pin = "";
+                    interface_hardware.send(display_enter_pin());
+                    state = &atm::getting_pin;
+                }
+            );
+        }
+
+        void getting_pin();
+
+    public:
+        void run() {
+            state = &atm::waiting_for_card;
+            try {
+                for(;;) {
+                    (this->*state)();
+                }
+            }
+            catch(messaging::close_queue const&) {}
+        }
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atm_imp1]: Implementación simple de la clase de lógica del cajero]
+
+En Listing [atm_imp1] se muestra la implementación de la lógica en un sistema como el descrito, con el *main loop* y la implementación del primer estado, esperando a que se inserte la tarjeta. Toda la sincronización necesaria para el paso de mensajes está completamente oculta dentro de la librería de mensajería. No hay necesidad de pensar sobre sincronización o problemas de concurrencia, tan solo que mensajes se pueden recibir en un momento dado y qué mensajes enviar. La máquina de estados para la lógica de este cajero se ejecuta en un solo hilo, mientras que las otras partes del sistema, como el interfaz con el banco o la terminal, se ejecutan en hilos separados. Este estilo de diseño de programación se llama *Actor Model*, hay varios actores en el sistema ejecutándose en distintos hilos, que se envían mensajes entre sí para realizar la tarea en cuestión, y no hay estado compartido, excepto el que es pasado directamente a través de mensajes.
+
+La ejecución empieza en la función miembro `run()`, que determina el estado inicial a `waiting_for_card`, y ejecuta de manera repetida la función miembro que representa el estado actual (sea cual sea). Las funciones de estado son simples funciones miembro de la clase `atm`. La función estado `waiting_for_card` también es sencilla, envia un mensaje al interfaz gráfico para mostrar el mensaje `waiting for card`, y espera a recibir un mensaje que manejar. El único tipo de mensaje que se puede manejar aquí es el mensaje `card_inserted`, que se maneja con una función *lambda*. Se le puede pasar cualquier función u objeto función a `handle`, pero aquí es más simple usar una *lambda*. La llamada a la función `handle()` está encadenada a una función `wait`, si se recibe un mensaje que no encaja con el tipo esperado, se descarta, y el hilo continua esperando hasta que el mensaje apropiado se reciba.
+
+La función *lambda* en sí misma almacena en caché el número de cuenta de la tarjeta en una variable miembro, borra el PIN actual, envía un mensaje al interfaz gráfico para mostrar algo pidiendo al usuario que introduzca su PIN en el teclado, y cambia al estado de `getting_pin`. Una vez la gestión del mensaje se ha completado, la función del estado actual se cierra y el *main loop* llama a la nueva función de estado.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+void atm::getting_pin() {
+    incoming.wait()
+    .handle<digit_pressed>(
+        [&](digit_pressed const& msg) {
+            unsigned const pin_length = 4;
+            pin += msg.digit;
+            if(pin.length() == pin_length) {
+                bank.send(verify_pin(account, pin, incoming));
+                state = &atm::verifying_pin;
+            }
+        }
+    )
+    .handle<clear_last_pressed>(
+        [&](clear_last_pressed const& msg) {
+            if(!pin.empty()) {
+                pin.resize(pin.length() - 1);
+            }
+        }
+    )
+    .handle<cancel_pressed>(
+        [&](cancel_pressed const& msg) {
+            state = &atm::done_processing;
+        }
+    );
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [atm_imp2]: Implementación del estado `getting_pin` del cajero]
+
+La función estado `getting_pin` es un poco más compleja, puesto que tiene que manejar tres tipos distintos de mensajes. Por lo que la función `wait()` tiene tres llamadas a `handle()` encadenadas al final. Cada llamada a `handle()` especifica el tipo de mensaje en el parámetro del template y le pasa una función *lambda* que coge ese tipo particular de mensaje como parámetro. Puesto que las llamadas están encadenadas de esta manera, la implementación de `wait()` sabe que está esperando un mensaje `digit_pressed`, `clear_last_pressed` o `cancel_pressed`. Cualquier otro mensaje se descarta.
+
+Esta vez, no hay que cambiar de estado necesariamente cuando se recibe un mensaje. Por ejemplo, al recibir un mensaje `digit_pressed`, se añade este dígito al `pin`, a menos que sea el dígito final. El *main loop* llamará otra vez en este caso al estado `getting_pin` otra vez para esperar al siguiente dígito (o borrar o cancelar).
+
+Esto corresponde al comportamiento mostrado en Figure [res/005_002]. Cada caja de estado se implementa por una función miembro distinta, que espera a los mensajes relevantes y actualiza el estado como toca.
+
+Como se puede apreciar, este estilo de programación puede simplificar mucho la tarea de diseñar un sistema concurrente, puesto que cada hilo se puede tratar de manera completamente independiente. Es un ejempo de usar varios hilos para la separación de intereses y como tal, hay que decidir de manera explícita como dividir las tareas entre hilos.
+
+<link rel="stylesheet" href="res/md/viu.css">
+<style class="fallback">body{visibility:hidden}</style><script>markdeepOptions={tocStyle:'long'};</script>
+<!-- Markdeep: --><script src="res/md/markdeep.min.js?" charset="utf-8"></script>
