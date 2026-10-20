@@ -164,6 +164,8 @@ Para evitar estas situaciones incorrectas, debería respetarse las siguientes re
 
 Existe un recurso compartido por todas las tareas, y el estado de este recurso se puede modificar. Algunas tareas usarán métodos para modificar el estado del recurso, serán `escritores`, otras tareas solo leerán el estado del recurso, no lo modificarán, serán `lectores`. Por ejemplo, un fichero, que puede ser leído  o escrito por diferentes procesos.
 
+![Figure [res/001_007]: Procesos lectores/escritores](res/001_007.png)
+
 Para garantizar que el recurso sea usado correctamente hay que respetar las siguientes restricciones:
 
 - Multiples tareas lectoras pueden acceder simultáneamente al recurso.
