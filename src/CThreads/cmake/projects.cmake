@@ -5,4 +5,12 @@ set(PROJECT_LIST
     04_LifeCycle
     05_ThreadGuard
     06_DataToThread
-    07_MoveDataToThread)
+    07_MoveDataToThread
+    08_MoveThread
+    09_ScopedThread
+    10_VectorThreads
+    11_ConcurrencyLevel
+    12_ThreadID
+    13_RaceCondition
+    14_Mutex
+    15_LockGuard)
