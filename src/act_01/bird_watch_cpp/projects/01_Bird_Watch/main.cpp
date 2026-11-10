@@ -199,7 +199,7 @@ void main_loop() {
   std::cout << "Running!!!" << std::endl;
 
   std::chrono::high_resolution_clock::time_point baseTime = std::chrono::high_resolution_clock::now();
-  int minutes_running = 5;
+  int minutes_running = 1;
 
   std::vector<image_data> queue;
   const int length_diff = 4;

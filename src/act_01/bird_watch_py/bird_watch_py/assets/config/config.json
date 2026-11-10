@@ -6,6 +6,6 @@
         "diff_name_prefix" : "diff_",
         "sleep_time" : 200,
         "time_running" : 30000,
-        "diff_queue_length" : 10
+        "diff_queue_length" : 5
     }
 }
