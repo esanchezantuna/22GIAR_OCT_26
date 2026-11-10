@@ -1,0 +1,11 @@
+{"traceEvents":[
+{"tid":100,"name":"Incrementar","ph":"B","ts":1794340687379341,"pid":1,"args":{} },
+{"tid":100,"name":"Incrementar","ph":"E","ts":1794340687387960,"pid":1,"args":{} },
+{"tid":0,"name":"MetricsFlush","ph":"B","ts":1794340687387967,"pid":1,"args":{} },
+{"tid":0,"name":"MetricsFlush","ph":"E","ts":1794340687387969,"pid":1,"args":{} },
+{"tid":101,"name":"Incrementar","ph":"B","ts":1794340687384566,"pid":1,"args":{} },
+{"tid":101,"name":"Incrementar","ph":"E","ts":1794340687388873,"pid":1,"args":{} },
+{"tid":0,"name":"MetricsFlush","ph":"B","ts":1794340687388877,"pid":1,"args":{} },
+{"tid":0,"name":"MetricsFlush","ph":"E","ts":1794340687388878,"pid":1,"args":{} },
+{"tid":0,"name":"END","ph":"R","ts":1794340687389679,"pid":1}
+] }

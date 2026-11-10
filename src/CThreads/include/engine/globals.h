@@ -7,4 +7,4 @@ namespace Global {
   extern std::unique_ptr<MetricsState> metrics;
 }
 
-#endif //MBR_CORE_GLOBALS_H
+#endif
