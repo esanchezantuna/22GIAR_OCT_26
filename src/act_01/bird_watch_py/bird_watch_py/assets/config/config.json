@@ -1,0 +1,11 @@
+{
+    "feed" : {
+        "feed_path" : ["..","feeder","feeder","assets","feed"],
+        "output_path" : ["..","feeder","feeder","assets","feed","output_py"],
+        "diff_path" : ["..","feeder","feeder","assets","feed","output_py","diff"],
+        "diff_name_prefix" : "diff_",
+        "sleep_time" : 200,
+        "time_running" : 30000,
+        "diff_queue_length" : 10
+    }
+}

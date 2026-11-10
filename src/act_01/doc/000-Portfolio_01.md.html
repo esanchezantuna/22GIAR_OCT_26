@@ -1,0 +1,269 @@
+<meta charset="utf-8">
+**22GIAR - Portfolio 01**
+    <small>©2026 VIU - 22GIAR Programación Concurrente, Distribuida y Paralela - Iván Fuertes</small>
+
+# Introducción
+
+Se está trabajando en un proyecto de investigación en el Centro de Estudios Ambientales del Mediterráneo, concretamente en un proyecto que intenta encontrar patrones de conducta en la fauna salvaje de una zona específica de la costa. Ahora mismo se están centrando los esfuerzos en aprender los patrones de vuelo de las especies de aves migratorias para averiguar cuales son las zonas que más visitan estas aves y ser capaces de proteger estas áreas y darles un espacio seguro para transitar.
+
+Hace tiempo se instaló una cámara en una torre de vigilancia que está constantemente tomando imágenes cenitales de un area de unos pocos kilómetros cuadrados. A su vez, se desarrolló una aplicación que estaba monitorizando esas imágenes, las procesaba y las enviaba a un algoritmo de computer vision que era capaz de mapear los movimientos de las aves y dibujar los patrones de sus movimientos, e incluso identificar la especie a la que pertenecía cada ave y guardar toda esa información en varios datasets para luego analizarlos offline.
+
+Inicialmente esta aplicación se desarrolló como un pequeño prototipo sin demasiadas expectativas, pero con el tiempo, viendo su utilidad se ha decidido ampliar su desarrollo y adaptarlo a un entorno más grande. Esta aplicación se ejecuta en un ordenador con bastantes limitaciones y no se tiene el presupuesto necesario para escalar el hardware. Pero por otra parte, el prototipo inicial se creó por desarrolladores poco expertos y no hicieron uso de las capacidades concurrentes del hardware disponible. Con lo cual, se ha propuesto adaptar dicho prototipo para que pueda ejecutarse sobre el hardware actual, pero haciendo uso de una arquitectura multi hilo.
+
+# Simulador - Feeder
+
+Para poder trabajar en un entorno controlado y más cómodo para los desarrolladores se ha creado una aplicación en Python, que hace las veces de la cámara que registra las imágenes. Se incluye en el proyecto en la carpeta *feeder*. Para ejecutarlo hay que instalar un entorno virtual para ese proyecto (se incluye el fichero PipFile con las dependencias, aunque solo depende de la librería [Pygame](https://pypi.org/project/pygame/) para funcionar). Una vez hecho, se puede ejecutar con `python -m feeder` desde la carpeta raíz del proyecto *feeder*.
+
+Esta aplicación realiza una simulación donde se capturan imágenes cada *n* segundos, recreando un paisaje con diversas aves volando sobre el suelo y siguiendo una serie de caminos.
+
+En el fichero `feeder/assets/config/config.json` se encuentran diversos parámetros para configurar la simulación. En concreto, los más relevantes son:
+
+- "game:time_per_frame", tiempo en milisegundos para generar un fotograma y mostrarlo por pantalla
+- "feed:time_per_feed", tiempo en milisegundos para grabar una captura en un fichero simulando la cámara
+- "feed:file_name_tmp", ruta temporal donde deja los ficheros de las capturas para luego renombrarlo a la ruta final
+- "feed:file_name", ruta final donde deja los ficheros de las capturas
+
+El resto de parámetros son de control de la simulación, como la imagen del fondo, de las aves,...
+
+![Figure [res/002]: Fotograma de la simulación](res/002.png)
+
+# Bird Watch
+
+Esta es la aplicación encargada de recoger las imágenes de la cámara y realizar los procesos de computer vision. En concreto las imágenes siguen un *pipeline* muy concreto.
+
+- Leer y borrar imagen del disco
+- Re dimensionar la imagen a la mitad de resolución
+- Rotar la imagen 90 grados en el sentido de las agujas del reloj
+- Convertir la imagen a escala de grises
+- Guardar la imagen procesada
+
+Por último, para facilitar el trabajo del algoritmo final, cada *x* imágenes procesadas se hace una diferencia entre ellas para encontrar que partes de la imagen han cambiado e identificar los objetos móviles entre los diferentes fotogramas. Al algoritmo final no tenemos acceso por ahora, puesto que lo está desarrollando otro equipo de desarrollo, y se ha acordado que nuestra parte del proyecto es dejar las imágenes en el formato establecido en un carpeta común `feeder/assets/feed/output/diff`, desde donde esa otra aplicación las cogerá y las analizará.
+
+# Detalles de implementación
+
+## Implementación en C++
+
+La implementación de la solución secuencial se encuentra en la carpeta `bird_watch_cpp`.
+
+### Métricas
+
+Dentro del proyecto de la aplicación BirdWatch se ha desarrollado una librería estática llamada `EngineLib`, que integra un sistema de métricas para tener acceso a un método simple para hacer profiling de la ejecución de la aplicación. En concreto para usarlo, se deben poner las siguientes líneas al inicio del `main` para lanzar el sistema de grabación de métricas.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+  Global::metrics = std::make_unique<MetricsState>();
+  Metrics_StartRecording(PROJECT_PATH "metrics.json");
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [metrics_1]: Empezar a grabar las métricas]
+
+Y antes de finalizar dicho `main`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+  Metrics_StopRecording();
+  Global::metrics.reset(nullptr);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [metrics_2]: Dejar de grabar las métricas]
+
+A partir de ese momento cuando se quiera medir el tiempo de ejecución de algún *scope* o función solo hay que poner al inicio del *scope*.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+MetricsScope metrics("Main Loop");
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [metrics_3]: Medir un *scope*]
+
+Donde se crea un objeto del tipo `MetricsScope`, y se le da un nombre. El sistema está desarrollado usando el idiom `RAII`, de tal manera que empieza a medir el tiempo desde que se encuentra al constructor, y automáticamente cuando se cierra el *scope* se deja de medir el tiempo y se registra en qué hilo se produjo dicha invocación.
+
+Al dejar de grabar las métricas o al finalizar la aplicación toda esa información se guarda en un fichero JSON, que por defecto aparece en la carpeta `bird_watch_cpp/projects/01_Bird_Watch/`. Este fichero se puede abrir usando Google Chrome. Para ello en la barra de navegación hay que escribir `chrome://tracing/` para acceder a la consola de depuración (habrá que habilitar antes los plugins de depuración de Google Chrome). Una vez en esta consola, simplemente arrastrando el fichero JSON se abre una visualización donde se pueden ver a la izquierda los hilos de ejecución, y por cada hilo una línea de tiempo donde se ven los bloques que representan los distintos *scopes* que se han medido, sus tiempos de ejecución y sus dependencias.
+
+![Figure [res/001]: Métricas de una ejecución mono hilo](res/001.png)
+
+De esta manera se puede observar como se intercalan y ejecutan las distintas tareas e hilos durante el transcurso de la aplicación, y optimizar y mejorar el trabajo de sincronización y paralelismo.
+
+### CMake
+
+La aplicación BirdWatch está desarrollada usando el entorno de desarrollo usado durante las clases, con CMake y VSCode. Se proveen los ficheros *cmake* necesarios para funcionar. En concreto:
+
+- CMakeLists.txt - Creación de la librería estática EngineLib y los proyectos que se hayan descrito
+- cmake/compiler.cmake - Configuración de distintos compiladores
+- cmake/deps_files.cmake - Configuración de ficheros de dependencias de terceros
+- cmake/engine_files.cmake - Configuración de los ficheros de EngineLib para las métricas
+- cmake/projects.cmake - Lista de proyectos, viene con uno para la aplicación mono hilada, se pueden crear más para distintas aproximaciones
+
+Todos estos ficheros se pueden tocar libremente si se necesita adaptar su uso. Concretamente pueden ser susceptibles de ello el fichero `projects.cmake`, donde poder crear algún otro proyecto para probar soluciones multi hilo y `engine_files.cmake` si se necesita ampliar a alguna clase/fichero para poder estructurar mejor la posible solución multi hilo.
+
+### Dependencias de terceros
+
+Se tiene una dependencia con la librería [*stb*](https://github.com/nothings/stb) para cargar y guardar imágenes del disco. Para usarlas dentro de las funciones de lectura y escritura de imágenes en el proyecto, hay que declarar y usar los headers así.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [stb]: Headers de stb]
+
+Las dependencias se resuelven en los ficheros CMake nombrados anteriormente.
+
+### Main Loop
+
+La aplicación tiene como punto central un bucle principal que está siempre en ejecución como un bucle infinito, que se rompe con el uso del *atomic* `running`. Esta variable se puede activar desde otro hilo que se lanza al inicio, que simplemente está a la espera de que el usuario pulse la tecla Enter para romper el bucle infinito. En cualquier caso, dicho bucle infinito se rompe cuando han transcurrido unos minutos determinados por la variable `int minutes_running = 5;`, que se puede modificar para determinar cuanto tiempo va a estar el bucle principal en funcionamiento.
+
+Dicho bucle principal busca cualquier fichero que se encuentre en la carpeta de imágenes del simulador `feeder`, que viene determinada por el `define #ASSETS_PATH`. Cada 30 milisegundos (se puede cambiar la frecuencia en el `sleep` del final del bucle) verifica si hay nuevas imágenes, en ese caso empieza el pipeline de procesamiento.
+
+#### Stage 01 - Carga de imagen
+
+Usando la librería *stb* carga la imagen en memoria, esta librería gestiona la compresión y codificación del formato de imagen PNG con el que se guardan las imágenes. Y deja en un buffer de memoria los datos RAW. Para albergar una imagen se ha creado un `struct`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ C++ linenumbers
+struct image_data{
+  int width, height, nChannels;
+  unsigned char* data;
+};
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[Listing [image_data]: Datos de imagen]
+
+Cada imagen viene internamente representada por una instancia de este `struct`, donde `width` y `height` es el ancho y alto de la imagen cargada, `nChannels` es el número de canales en este caso son 3 canales, RGB, no se hace uso del canal Alpha. Y por último un puntero al buffer de memoria donde se han cargados los datos RAW de la imagen.
+
+#### Stage 02 - Borrado de imagen
+
+Una vez se carga la imagen en memoria se procede a borrar la imagen del disco para evitar que se procese más veces.
+
+#### Stage 03 - Redimensionar la imagen
+
+El algoritmo de computer vision nos exige que la imagen sea más pequeña de la que viene por defecto de la resolución nativa de la cámara, en este caso, es suficiente con hacer esto al mitad del tamaño original, que es de 1024 x 512. Con lo cual se tienen que dejar a 512 x 256. Para esto se hace uso de un nuevo buffer donde ir dejando los nuevos píxeles, y se hace una media entre los 4 píxeles que hay que recoger por cada pixel de destino.
+
+Este algoritmo no es el más óptimo, pero es suficiente para los propósitos de este ejercicio y siendo más lento de lo que debería nos da la oportunidad de practicar mejor la optimización concurrente.
+
+Por último, como todos las demás partes del pipeline tiene un sleep de 100 milisegundos, que se puede modificar para simular mayor latencia si es necesario al simular el entorno real.
+
+#### Stage 04 - Rotar la imagen
+
+La parte de computer vision también exige que la imagen tenga que ser rotada 90 grados en el sentido de las agujas del reloj, esto es así porque la cámara está montada en el dispositivo hardware rotada 90 grados en sentido contrario, y la imagen nativa que se proporciona no es correcta.
+
+Haciendo uso de una técnica similar a al del punto anterior, y sin ser la más óptima, se consigue dicha rotación trabajando a bajo nivel con los componentes de color del buffer de memoria.
+
+#### Stage 05 - Grayscale
+
+Y como último paso del preprocesamiento de la imagen hay que convertirla a escala de grises. Para ello se sigue la formula descrita en [wikipedia](https://en.wikipedia.org/wiki/Grayscale) para hacerlo de la manera más correcta posible en el espacio sRGB.
+
+#### Stage 06 - Guardar imagen
+
+Una vez se tiene la imagen pre procesada hay que guardarla en el disco, dentro de la carpeta `feeder/assets/feed/output/`, al menos mientras dure la fase de pruebas para ver que todo está funcionando correctamente y no se pierde ninguna parte del pipeline.
+
+![Figure [res/003]: Imagen procesada](res/003.png)
+
+#### Stage 07 - Diferencia
+
+Para identificar las partes móviles entre las distintas imágenes y poder mapear los movimientos, el algoritmo de computer vision necesita que le demos las diferencias entre diversos bloques de imágenes.
+
+Para ello, cada vez que una imagen acaba de ser procesada y guardada en disco, se almacenan sus datos en una cola temporal. Cuando esta cola llega a un tamaño determinado en `const int length_diff = 4;`, que por defecto es de 4 imágenes se realiza la diferencia entre esas imágenes. Este valor debe de ser dinámico y en la versión definitiva será modificado por el propio algoritmo de computer vision según sus necesidades en tiempo de ejecución, por ahora, en desarrollo se puede modificar para ver que el comportamiento es el correcto.
+
+La diferencia de imágenes se realiza con todas las que estén en la cola en ese momento. Se crea un buffer vacío para recoger la nueva imagen. Se samplea cada pixel de las 4 imágenes y se calcula diferencia entre ellas, si hay alguna diferencia se guarda en dicho pixel el valor máximo de color, y en caso contrario un 0 para el negro.
+
+Al final se vuelve a guardar esta imagen diferencial en `feeder/assets/feed/output/diff/` donde se pueden observar fácilmente los cambios entre los distintos fotogramas. También se borra la cola con las imágenes temporales de las cuales se han obtenido los datos diferenciales.
+
+![Figure [res/004]: Imagen diferencial](res/004.png)
+
+## Implementación en Python
+
+La implementación de la solución secuencial se encuentra en la carpeta `bird_watch_py`. Para ejecutarlo hay que instalar un entorno virtual para ese proyecto (se incluye el fichero PipFile con las dependencias, aunque solo depende de la librería [Pillow](https://pypi.org/project/pillow/) para funcionar). Una vez hecho, se puede ejecutar con `python -m bird_watch_py` desde la carpeta raíz del proyecto *bird_watch_py*.
+
+En el fichero `bird_watch_py/assets/config/config.json` se encuentran diversos parámetros para configurar la aplicación de procesamiento de imágenes.
+
+- "feed:feed_path", ruta donde ir a buscar las imágenes que ha generado el *feeder* simulando la cámara
+- "feed:output_path", ruta donde dejar las imágenes procesadas
+- "feed:diff_path", ruta donde dejar las imágenes procesadas con las diferencias entre varias imágenes con las diferencias entre ellas
+- "feed:diff_name_prefix", prefijo del nombre del fichero para las imágenes de diferencias
+- "feed:sleep_time", tiempo que se pone al main loop aen segundo plano entre cada iteración esperando imágenes nuevas
+- "feed:time_running", tiempo en ejecución de la aplicación
+- "feed:diff_queue_length", longitud de la cola de imágenes ya procesadas antes de enviarlas al algoritmo que calcula las diferencias entre ellas
+
+### Main Loop
+
+La aplicación consiste de un bucle principal que se está ejecutando por un tiempo determinado en la configuración anteriormente descrita. En cada iteración de este bucle infinito se mira la carpeta donde el simulador deja las imágenes a procesar, si hay nuevas imágenes las procesa todas una a una, de manera secuencial, y para cada una de ellas llama al método `process_file`.
+
+Una vez procesada cada imagen, la encola en `queue`, y cuando esta cola llega al número de elementos necesarios se manda a calcular la diferencia entre todas las imágenes preprocesadas en `calc_diff`.
+
+Al final del proceso se llama al algoritmo `computer_vision_algorithm` que está sin implementar y es la parte final del proceso que en la versión final del sistema sería la responsable de obtener los patrones de vuelo a partir de las imágenes diferenciales. Por ahora, en el *placeholder* simplemente se simula una latencia con el objetivo de perfeccionar el algoritmo de procesamiento.
+
+### Process File
+
+Se realizan los distintos pasos del pipeline de procesamiento de manera secuencial.
+
+#### Stage 01 - Carga de imagen
+
+Haciendo uso de la librería *Pillow* se carga la imagen.
+
+#### Stage 02 - Borrado de imagen
+
+Una vez se carga la imagen en memoria se procede a borrar la imagen del disco para evitar que se procese más veces.
+
+#### Stage 03 - Redimensionar la imagen
+
+Al igual que el algoritmo en C++ se redimensiona a la mitad en ancho y alto.Por último, como todos las demás partes del pipeline tiene un sleep de 100 milisegundos, que se puede modificar para simular mayor latencia si es necesario al simular el entorno real.
+
+#### Stage 04 - Rotar la imagen
+
+Al igual que el algoritmo en C++ se rota la imagen 90 grados.
+
+#### Stage 05 - Grayscale
+
+Y como último paso del preprocesamiento de la imagen hay que convertirla a escala de grises.
+
+#### Stage 06 - Guardar imagen
+
+Una vez se tiene la imagen pre procesada hay que guardarla en el disco, dentro de la carpeta `feeder/assets/feed/output_py/`, al menos mientras dure la fase de pruebas para ver que todo está funcionando correctamente y no se pierde ninguna parte del pipeline.
+
+![Figure [res/003]: Imagen procesada](res/003.png)
+
+#### Stage 07 - Diferencia
+
+Tal como se hace en el algoritmo de C++, cada imagen se guarda en una cola temporal en memoria, y cada *x* imágenes procesadas se hace una imagen diferencial entre ellas que se guarda en disco en `feeder/assets/feed/output_py/diff/` y luego se limpia la cola.
+
+![Figure [res/004]: Imagen diferencial](res/004.png)
+
+# Trabajo a desarrollar
+
+El alumno tendrá que trabajar sobre todo en la aplicación Bird Watch, y establecer los mecanismos oportunos para convertir la aplicación a trabajar en multi hilo.
+
+El simulador deja las imágenes que va creando en `feeder/assets/feed/` en formato `.png`. Se puede cambiar la frecuencia con la que las va generando con el parámetro `feed:time_per_feed`, que por defecto está puesto a 500 milisegundos. Pero se puede incrementar para poder probar con más o menos intensidad la aplicación BirdWatch. Se recomienda en una fase inicial de desarrollo crear un banco de imágenes estático, y trabajar sobre ellas sin necesidad de tener el simulador en marcha todo el tiempo, y cuando la aplicación BirdWatch ya esté lo suficientemente desarrollada se pueden poner ambas en ejecución simultanea para simular el entorno real de trabajo. Donde una cámara irá dejando imágenes de manera continua y la otra aplicación debe manejarlas con la suficiente velocidad para que las imágenes no se amontonen y que sea una aplicación que las trate en tiempo real.
+
+## Entrega
+
+- Código del simulador `feeder`, en caso de haber realizado alguna modificación sobre el mismo
+- Código del proyecto `bird_watch_cpp` o `bird_watch_py`
+  - Se puede trabajar en diversos proyectos, para probar diversas aproximaciones
+  - Se puede trabajar en EngineLib (si se hace sobre C++) para desarrollar código común a varias soluciones
+- Documento de memoria con la descripción de las soluciones propuestas
+  - Puede ser un documento MarkDeep/down, pdf, word, txt,...
+  - Imágenes relacionadas como cronogramas para describir las soluciones (pueden ser documentos de imagen como png, jpg, o diagramas de draw.io u otros)
+
+## Nivel 01 - Solución - 5 puntos
+
+Documentar varias soluciones y aproximaciones posibles al problema en lenguaje natural. Comparando dichas soluciones, puntos a favor o en contra. Diseñando posibles sistemas de sincronización que puedan permitir el trabajo correcto del proyecto, sin incurrir en condiciones de carrera, deadlocks,... Incluir posibles cronogramas describiendo el flujo de trabajo de los distintos hilos/tareas (como los vistos en clase).
+
+## Nivel 02 - Implementación PseudoCódigo - 1 punto
+
+Se implementan en pseudo código las soluciones propuestas anteriormente, sin entrar en detalles de implementación específicos en C++ o Python.
+
+## Nivel 03 - Implementación C++ o Python - 4 puntos
+
+Se implementa la solución completa en C++ o Python, se puede ejecutar y hace lo esperado.
+
+Se proveen las dos implementaciones secuenciales originales, cada una de ellas en su respectiva carpeta, `bird_watch_cpp` para la solución en C++, y `bird_watch_py` para la solución en Python. En cada caso habrá que desarrollar los mecanismos de concurrencia necesarios para resolver el problema inicial, y convertir la solución secuencial propuesta a una solución concurrente.
+
+Si se opta por la solución en C++ y esta es correcta y funcional el alumno tendrá un bonus en el examen final, donde se le sumará un punto extra al resultado final.
+
+## Rúbrica
+
+Apartados | Suspenso < 5 | Aprobado >= 5 | Sobresaliente >= 9
+:--------|:--------|:--------|:--------
+Estilo (10%) | Redacción incoherente gramaticalmente y/o con más de 3 faltas ortográficas. No se presenta ordenadamente el contenido ni se adjuntan suficientes recursos para entender las soluciones. | Redacción coherente, estilo informal o alguna falta ortográfica. El contenido se presenta de manera adecuada. | Redacción impecable, con estructura definida, estilo formal y sin faltas ortográficas. Se trabaja con el fichero utilizando estilos, alternando código, imágenes y comentarios adecuadamente.
+Contenidos (40%) | No hay evidencia de reflexión sobre las referencias propuestas. No hay motivación o justificación de la selección de las soluciones. | Se proponen soluciones correctas y se justifica resumidamente el motivo de la elección de las mismas. | Se desarrollan, de forma sintetizada y correcta, las soluciones, se discute de manera adecuada y comparativa las mismas. Se piensa en la escalabilidad y potenciales puntos de mejora. Se muestran ejemplos y descripciones de las cuestiones con recursos adicionales para mejorar la comprensión.
+Pseudocódigo (10%) | La solución propuesta no es completa, usando lenguaje informal. | La solución usa lenguaje adecuado, pero presenta algún problema lógico. | La solución es correcta y se podría implementar en C++ o Python fácilmente solucionando el problema propuesto.
+Código C++ (40%) | El código tiene errores de sintaxis, no compila o tiene errores graves de ejecución. | El código compila y se ejecuta pero presenta diversos bugs relacionados con la programación concurrente. | El código compila, se ejecuta y soluciona correctamente y de manera óptima el problema propuesto.
+[Table [rubrica]: Rúbrica]
+
+<link rel="stylesheet" href="res/md/viu.css">
+<style class="fallback">body{visibility:hidden}</style><script>markdeepOptions={tocStyle:'long'};</script>
+<!-- Markdeep: --><script src="res/md/markdeep.min.js?" charset="utf-8"></script>

@@ -1,0 +1,63 @@
+{
+    "game" : {
+        "screen_size" : [1024, 512],
+        "title" : "Feeder",
+        "time_per_frame" : 16,
+        "time_to_sleep" : 1,
+        "bg_color" : [0,0,0],
+        "fg_color" : [255, 255, 255]
+    },
+    "feed" : {
+        "time_per_feed" : 500,
+        "file_name_tmp" : ["feeder.assets.feed.tmp", "tmp_"],
+        "file_name" : ["feeder.assets.feed", "feed_"]
+    },
+    "font" : {
+        "name" : "sansation",
+        "file" :  ["feeder.assets.fonts", "Sansation.ttf"],
+        "size" : 24
+    },
+    "stats" : {
+       "pos" : [0,0],
+       "refresh_time" : 1000.0
+    },
+    "entities" : {
+        "name" : "birds",
+        "image_file" : ["feeder.assets.images", "birds.png"],
+        "size" : [5, 3],
+        "time_per_sequence" : 150,
+        "spawn_prob" : 0.02,
+        "speed" : [0.1, 0.2],
+        "birds" : {
+            "eagle" : {
+                "row" : 0
+            },
+            "cardinal" : {
+                "row" : 1
+            },
+            "sparrow" : {
+                "row" : 2
+            },
+            "robin" : {
+                "row" : 3
+            },
+            "bluejay" : {
+                "row" : 4
+            }
+        }
+    },
+    "splines" : [
+        [[700,-30], [700,0], [590, 90], [650,250], [475,375], [350,100], [100,225], [225,530], [225,560]],
+        [[1054,100], [1024,100], [775, 375], [450,550], [150,400], [50,100], [400,225], [200,-30], [200,-50]],
+        [[1000,550], [1000,512], [900, 100], [700,100], [500,225], [500,350], [775,400], [1040,300], [1075,300]]
+    ],
+    "debug" : {
+        "spline_control_point_color" : [0,255,255],
+        "spline_color" : [255,255,255],
+        "spline_res" : 100
+    },
+    "background" : {
+        "name" : "base",
+        "image_file" : ["feeder.assets.images", "base.png"]
+    }
+}
